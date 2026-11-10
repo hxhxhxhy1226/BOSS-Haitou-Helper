@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BOSS直聘海投助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="brand">
+    <img src="icons/icon48.png" width="40" height="40" alt="">
+    <div><h1>BOSS 投递助手</h1><p>独立扩展 <span id="version">1.1.0</span></p></div>
+  </header>
+
+  <section class="card" aria-labelledby="page-heading">
+    <h2 id="page-heading">当前页面</h2>
+    <div class="connection" id="connection" data-connected="false">
+      <span class="dot" aria-hidden="true"></span><strong id="page-state">正在连接…</strong>
+    </div>
+    <p class="hint" id="page-hint">正在检查当前 BOSS 职位页面。</p>
+    <div class="button-row">
+      <button id="toggle-panel" class="secondary" disabled>显示助手</button>
+      <button id="stop" class="danger" disabled>停止投递</button>
+    </div>
+    <button id="open-boss" class="primary full">打开 BOSS 职位页</button>
+    <p class="footnote">筛选规则和 AI 设置在职位页面的助手面板中调整。</p>
+  </section>
+
+  <section class="card" aria-labelledby="api-heading">
+    <h2 id="api-heading">AI 接口访问</h2>
+    <p class="hint" id="api-summary">正在读取已保存的接口…</p>
+    <ul id="api-origins" aria-label="已配置的 AI 服务域名"></ul>
+    <button id="authorize-api" class="secondary full" disabled>授权 AI 接口</button>
+    <p class="footnote">仅授权已保存接口所在的域名。使用本地筛选无需此授权。</p>
+  </section>
+
+  <p id="message" class="message" role="status" aria-live="polite"></p>
+  <footer>招呼内容由 BOSS 手机端默认设置决定。</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# Installed dependencies and local assistant state
+node_modules/
+.workbuddy/
+.workbuddy-ai/
+.codex/
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*secrets*.json
+boss_helper_config*.json
+*config-export*.json
+
+# Generated test output, reports and release archives
+tests/*output*.txt
+test-results/
+coverage/
+dist/
+artifacts/
+.qa-chrome-profile/
+*.log
+*.zip
+*.tgz
+*.tmp
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini

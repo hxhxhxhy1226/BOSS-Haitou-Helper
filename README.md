@@ -94,20 +94,29 @@ AI 为可选功能。关闭 AI 即可使用本地规则筛选，无需授权 AI 
 
 ## 界面预览
 
-<p align="center">
-  <img src="docs/images/popup.png" width="300" alt="扩展工具栏：面板控制、停止投递与 AI 域名授权">
-</p>
-
-<p align="center"><sub>浏览器工具栏：连接状态、面板控制和接口授权。</sub></p>
+<table align="center">
+  <tr>
+    <th align="center">投递主面板</th>
+    <th align="center">浏览器工具栏</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><img src="docs/images/delivery-panel.png" width="300" alt="投递主面板：运行状态、处理统计、开始投递、AI 设置与规则设置"></td>
+    <td align="center" valign="top"><img src="docs/images/popup.png" width="256" alt="浏览器工具栏：面板控制、停止投递与 AI 域名授权"></td>
+  </tr>
+  <tr>
+    <td align="center">查看投递统计，配置规则与 AI，开始或停止任务。</td>
+    <td align="center">查看连接状态，控制面板与接口授权。</td>
+  </tr>
+</table>
 
 <details>
-<summary><strong>展开查看岗位页面板</strong></summary>
+<summary><strong>展开查看岗位页完整演示</strong></summary>
 
 ![岗位页助手面板](docs/images/panel.png)
 
 </details>
 
-截图来自本地模拟岗位，用于展示界面，不代表真实招聘账号的投递结果。
+投递主面板截图由用户提供；工具栏和完整岗位页截图来自本地模拟演示。图片用于展示界面，不代表消息已送达或 HR 已读。
 
 ## 开发与打包
 

@@ -85,7 +85,7 @@ export function sourcePackageFiles(root, extensionFiles) {
     const relative = 'design/briefcase/' + name;
     if (fs.existsSync(path.join(root, relative))) files.set(relative, fs.readFileSync(path.join(root, relative)));
   }
-  for (const relative of ['docs/images/popup.png', 'docs/images/panel.png']) {
+  for (const relative of ['docs/images/popup.png', 'docs/images/panel.png', 'docs/images/delivery-panel.png']) {
     if (fs.existsSync(path.join(root, relative))) files.set(relative, fs.readFileSync(path.join(root, relative)));
   }
   for (const directory of ['scripts', 'tests']) {

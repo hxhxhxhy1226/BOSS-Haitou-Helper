@@ -72,6 +72,74 @@ const fixture = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>
   function startRebuilding(){stopRebuilding();fixtureReplaceTimer=setInterval(function(){const old=document.querySelector('.op-btn-chat');if(!old||fixtureClicks){stopRebuilding();return;}const current=old.cloneNode(true);current.dataset.fixtureGeneration=String(++fixtureReplacements);old.replaceWith(current);bindContact();},80);fixtureReplaceDeadline=setTimeout(stopRebuilding,6000);}
   bindContact(); document.querySelector('.job-card-box').addEventListener('click',function(e){e.preventDefault();document.querySelector('#detail-host').innerHTML=${JSON.stringify(detail)};bindContact();startRebuilding();});
   </script></html>`;
+
+// This runs only in the intercepted local fixture, after the earlier delivery checks.
+function installLazyListFixture() {
+  const original = document.querySelector('.job-list-wrapper');
+  const list = document.createElement('div');
+  list.id = 'fixture-lazy-list'; list.className = 'job-list-wrapper';
+  list.style.cssText = 'position:fixed;left:48px;top:200px;width:360px;height:260px;overflow-y:auto;overflow-x:hidden;padding:0;margin:0;box-sizing:border-box;scroll-behavior:auto;background:white;';
+  original.replaceWith(list);
+  const host = document.querySelector('#detail-host');
+  host.removeAttribute('aria-hidden');
+  host.style.cssText = 'position:fixed;left:440px;top:180px;width:500px;max-width:500px;height:650px;overflow:auto;margin:0;';
+  const longPage = document.createElement('div'); longPage.style.height = '2400px'; document.body.append(longPage);
+  window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  window.fixtureLazyScrolls = []; window.fixtureLazyOuterMoves = [];
+  window.fixtureLazyAdded = false; window.fixtureLazyUpward = false;
+  const jobs = [1, 2, 3].map((number) => ({ id: 'lazy-job-' + number, title: '嵌入式软件工程师（加载岗位' + number + '）' }));
+  const makeCard = (job) => {
+    const card = document.createElement('article');
+    card.dataset.jobid = job.id; card.dataset.lazyId = job.id;
+    // Use the same recognized outer structure as BOSS while fixing each card's height.
+    card.className = 'job-card-wrap';
+    card.style.cssText = 'display:block;box-sizing:border-box;height:130px;padding:8px;margin:0;';
+    card.innerHTML = '<a class="job-name" href="/job_detail/' + job.id + '.html">' + job.title + '</a>'
+      + '<div class="job-salary">20-30K</div><a class="company-name" href="/gongsi/lazy-fixture.html">本地列表测试公司</a>'
+      + '<div class="job-card-footer"><span class="time">今日活跃</span></div>';
+    return card;
+  };
+  list.append(makeCard(jobs[0]), makeCard(jobs[1]));
+  const spacer = document.createElement('div'); spacer.style.height = '390px'; list.append(spacer);
+  window.fixtureLazyInitialHeight = list.scrollHeight;
+  let lastListTop = list.scrollTop, lastPageTop = window.scrollY;
+  window.addEventListener('scroll', () => {
+    if (window.scrollY !== lastPageTop) window.fixtureLazyOuterMoves.push([lastPageTop, window.scrollY]);
+    lastPageTop = window.scrollY;
+  });
+  list.addEventListener('scroll', () => {
+    const top = list.scrollTop, maximum = list.scrollHeight - list.clientHeight;
+    window.fixtureLazyScrolls.push([lastListTop, top]);
+    const ready = [...list.querySelectorAll('[data-lazy-id]')].slice(0, 2)
+      .every((card) => card.dataset.bhProcessed === '1');
+    if (ready && top < lastListTop - 1) window.fixtureLazyUpward = true;
+    lastListTop = top;
+    if (ready && window.fixtureLazyUpward && top >= maximum - 2 && !window.fixtureLazyAdded) {
+      window.fixtureLazyAdded = true;
+      list.insertBefore(makeCard(jobs[2]), spacer);
+      spacer.style.height = '260px'; // New job, identical total scrollHeight.
+    }
+  });
+  list.addEventListener('click', (event) => {
+    const card = event.target.closest('[data-lazy-id]');
+    if (!card) return;
+    event.preventDefault();
+    const job = jobs.find((item) => item.id === card.dataset.lazyId);
+    host.innerHTML = '<section class="job-detail" data-jobid="' + job.id + '"><header class="job-banner">'
+      + '<h1 class="job-name">' + job.title + '</h1><a class="company-name" href="/gongsi/lazy-fixture.html">本地列表测试公司</a>'
+      + '<span class="salary">20-30K</span><a href="/job_detail/' + job.id + '.html">查看职位</a><a class="op-btn-chat" href="javascript:void(0)">立即沟通</a></header>'
+      + '<section class="job-detail-section"><h2>职位描述</h2><div class="job-sec-text">负责' + job.title
+      + '对应的 STM32 产品固件研发、FreeRTOS 驱动调试及通信协议实现，参与本型号设备的软件设计和量产验证。</div></section>'
+      + '<div class="boss-info"><span class="active-time">今日活跃</span></div></section>';
+    host.querySelector('.op-btn-chat').addEventListener('click', (click) => { click.preventDefault(); window.fixtureClicks++; });
+  });
+  const field = (key) => document.querySelector('#boss-helper-panel [data-cfg="' + key + '"]');
+  for (const [key, value] of Object.entries({ mustHave: '', mustNot: '', yearsMin: 0, eduMin: 0, salaryMin: 0, activeDays: 0,
+    dailyLimit: 50, maxRounds: 0, minDelay: 0.5, maxDelay: 0.5, pageDelayMin: 0.5, pageDelayMax: 0.5, batchPauseSec: 0 })) field(key).value = value;
+  field('autoSend').checked = false; field('autoScroll').checked = false;
+  document.querySelector('#boss-helper-panel [data-act="save"]').click();
+}
+
 try {
   const portFile = await until(async () => { try { return await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8'); } catch { return null; } });
   const [port, socket] = portFile.trim().split(/\r?\n/);
@@ -176,6 +244,18 @@ try {
   check(await evaluate(popup, "!document.querySelector('script:not([src])')"), '工具栏页面在扩展 CSP 下加载');
   const popupShot = await send('Page.captureScreenshot', { format: 'png' }, popup);
   await fs.writeFile(path.join(output, 'edge-extension-popup.png'), Buffer.from(popupShot.data, 'base64'));
+  const contactsBeforeLoading = await evaluate(page, 'fixtureClicks');
+  await evaluate(page, '(' + installLazyListFixture.toString() + ')()');
+  await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.dailyLimit===50 && v.boss_helper_config_v1.autoSend===false && v.boss_helper_config_v1.aiEnabled===false && v.boss_helper_config_v1.maxRounds===0)"));
+  await evaluate(page, "document.querySelector('#boss-helper-panel [data-act=toggle]').click()");
+  await until(() => evaluate(page, "!!document.querySelector('#fixture-lazy-list [data-lazy-id=lazy-job-3] .bh-tag-matched')"), 35000);
+  check(await evaluate(page, "fixtureLazyAdded && fixtureLazyUpward && document.querySelector('#fixture-lazy-list').scrollHeight===fixtureLazyInitialHeight && fixtureLazyScrolls.some(([from,to])=>to<from)"), '固定高度列表向上回滚再到底后加载新岗位，并继续完成筛选');
+  status = await evaluate(workerSession, `chrome.tabs.sendMessage(${bossTabId},{type:'BH_UI',action:'status'})`);
+  check(status.ok && status.running && await evaluate(page, "!document.querySelector('.bh-reason').textContent.includes('未发现新岗位') && !document.querySelector('.bh-reason').textContent.includes('已无更多职位')"), '第三个新岗位出现后仍在运行，不误报列表耗尽');
+  check(await evaluate(page, `fixtureClicks===${contactsBeforeLoading} && fixtureLazyOuterMoves.length===0`), '仅滚动内层岗位列表，筛选加载过程不额外发起沟通');
+  await evaluate(workerSession, `chrome.tabs.sendMessage(${bossTabId},{type:'BH_UI',action:'stop'})`);
+  const listShot = await send('Page.captureScreenshot', { format: 'png' }, page);
+  await fs.writeFile(path.join(output, 'edge-extension-list-loading.png'), Buffer.from(listShot.data, 'base64'));
   check(pageErrors.length === 0, '真实内容脚本无未捕获页面异常');
   await fs.writeFile(path.join(output, 'edge-extension-report.json'), JSON.stringify({ status: 'passed', checks, pageErrors,
     extensionVersion, browser: await send('Browser.getVersion') }, null, 2));

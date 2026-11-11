@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.2 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.3 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -247,11 +247,13 @@
   };
 
   function qAll(key, root = document) {
+    if (key === 'jobCard') return collectJobCards(root);
     const list = SEL[key]; if (!list) return [];
     for (const s of list) { const n = root.querySelectorAll(s); if (n.length) return Array.from(n); }
     return [];
   }
   function qOne(key, root = document) {
+    if (key === 'jobCard') return collectJobCards(root)[0] || null;
     const list = SEL[key]; if (!list) return null;
     for (const s of list) { const n = root.querySelector(s); if (n) return n; }
     return null;
@@ -264,6 +266,79 @@
   // 故意不含 SEL.jobCard 里的 [data-jobid] 与 .job-primary：右侧详情面板本身也可能带
   // data-jobid / 落在 .job-primary 里，把它们算成卡片就会把面板里的内容一起排除掉。
   const JOB_CARD_SEL = 'li.job-card-box, .job-card-wrap, .card-area, li.job-card, .job-card-wrapper';
+  const JOB_LIST_SEL = '.job-list-wrapper, .job-list, .job-list-box, .search-job-result, .job-box, .recommend-job-list, .job-list-container';
+
+  function collectJobCards(root = document) {
+    let nodes = [...root.querySelectorAll(JOB_CARD_SEL)];
+    // 混合新旧结构时也扫描列表内的旧卡片，不把右侧带 data-jobid 的详情当岗位。
+    for (const list of root.querySelectorAll(JOB_LIST_SEL)) nodes.push(...list.querySelectorAll('[data-jobid], .job-primary'));
+    if (!nodes.length) nodes = [...root.querySelectorAll('[data-jobid], .job-primary')];
+    nodes = [...new Set(nodes)].sort((a, b) => a === b ? 0 : a.compareDocumentPosition(b) & 2 ? 1 : -1);
+    nodes = nodes.filter((node) => !node.closest('#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, ' + DETAIL_ROOT_SEL)
+      && isReadableElement(node));
+    // 同一张卡片的 wrapper / card-area 只保留外层，混合结构则全部保留。
+    const candidates = new Set(nodes);
+    return nodes.filter((node) => {
+      for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) {
+        if (candidates.has(parent)) return false;
+      }
+      return true;
+    });
+  }
+  function jobCardKey(card) {
+    const identity = scopeJobIdentity(card, true, true);
+    if (identity.ambiguous) return '';
+    if (identity.jobId) return 'job:' + identity.jobId;
+    if (identity.dataJobId) return 'data:' + identity.dataJobId;
+    const field = (selectors) => {
+      for (const selector of selectors) {
+        const node = card.querySelector(selector);
+        if (node?.textContent.trim()) return node.textContent.replace(/\s+/g, ' ').trim();
+      }
+      return '';
+    };
+    const title = field(SEL.jobTitle);
+    return title ? 'text:' + stableAIHash([title, field(SEL.companyName), field(SEL.salary),
+      field(['.job-area', '.job-location', '.job-area-wrapper', '.city-name'])]) : '';
+  }
+  function clearJobCardMarker(card) {
+    delete card.dataset.bhProcessed;
+    delete card.dataset.bhProcessedKey;
+    card.querySelector('.bh-tag')?.remove();
+  }
+  function getUnprocessedJobCards() {
+    const processed = state._processedJobs || new Set();
+    return collectJobCards().filter((card) => {
+      const key = jobCardKey(card);
+      if (!key) return false;
+      const title = card.matches(SEL.jobTitle.join(',')) ? card : card.querySelector(SEL.jobTitle.join(','));
+      if (!title?.textContent.trim()) return false; // 等待骨架卡片填入真正的岗位标题。
+      if (card.dataset.bhProcessedKey && card.dataset.bhProcessedKey !== key) clearJobCardMarker(card);
+      if (processed.has(key)) {
+        card.dataset.bhProcessed = '1'; card.dataset.bhProcessedKey = key;
+        const outcome = state._jobOutcomes?.get(key);
+        if (outcome && !card.querySelector('.bh-tag')) tagCard(card, outcome.kind, outcome.reason);
+        return false;
+      }
+      // DOM 标记不能证明当前岗位已处理：节点可能被虚拟列表重复利用。
+      if (card.dataset.bhProcessed) clearJobCardMarker(card);
+      return true;
+    });
+  }
+  function markJobCardProcessed(card, key = jobCardKey(card)) {
+    if (!key || !card.isConnected || jobCardKey(card) !== key) return false;
+    if (!state._processedJobs) state._processedJobs = new Set();
+    state._processedJobs.add(key);
+    card.dataset.bhProcessed = '1'; card.dataset.bhProcessedKey = key;
+    const tag = card.querySelector('.bh-tag');
+    const kind = ['pass', 'matched', 'skip', 'info', 'ai-skip', 'not-sent', 'pending']
+      .find((name) => tag?.classList.contains('bh-tag-' + name));
+    if (kind) {
+      if (!state._jobOutcomes) state._jobOutcomes = new Map();
+      state._jobOutcomes.set(key, { kind, reason: tag.querySelector('.bh-tag-reason')?.textContent || '' });
+    }
+    return true;
+  }
 
   // v1.0.17：这段文本是不是"别的职位的东西"。
   // 误判史：v1.0.13 的「活跃 183 天前」、v1.0.14 的「活跃 14 天前」、
@@ -1906,64 +1981,80 @@
   }
 
   function findScrollContainer() {
-    if (document.documentElement.scrollHeight > window.innerHeight + 100) {
-      return { el: document.documentElement, win: true };
-    }
-    let el = document.querySelector('.job-list-wrapper, .job-list, .search-job-result, .job-box, .recommend-job-list');
-    while (el && el !== document.body) {
-      const s = getComputedStyle(el);
-      if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
-        return { el, win: false };
+    const firstCard = collectJobCards()[0];
+    const anchors = [firstCard?.parentElement, ...document.querySelectorAll(JOB_LIST_SEL)].filter(Boolean);
+    for (const anchor of anchors) {
+      if (!isReadableElement(anchor) || anchor.closest(DETAIL_ROOT_SEL + ', #boss-helper-panel')) continue;
+      for (let el = anchor; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+        const s = getComputedStyle(el);
+        if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 1) {
+          return { el, win: false };
+        }
       }
-      el = el.parentElement;
     }
-    return { el: document.documentElement, win: true };
+    return { el: document.scrollingElement || document.documentElement, win: true };
   }
 
-  // v1.0.16：后台模式下滚动加载的成功率会下降，两个原因：
-  //   ① BOSS 列表懒加载多靠 scroll 事件 / IntersectionObserver 触发，
-  //      而不可见页面里 rAF 被冻结 → IntersectionObserver 回调根本不派发。
-  //   ② 滚到底后新卡片是异步渲染的，前台等 800~1500ms 够，后台网络/渲染都更慢。
-  // 对策：滚完主动补派 scroll 事件（能唤醒基于 scroll 监听的懒加载），
-  //      并把"等新卡片出现"改成轮询 scrollHeight，而不是死等固定时长。
-  async function scrollToBottom() {
-    const { el, win } = findScrollContainer();
-    const before = win ? document.documentElement.scrollHeight : el.scrollHeight;
-    const total = randInt(400, 900);
-    let scrolled = 0;
-    while (scrolled < total) {
-      const step = randInt(80, 200);
-      if (win) window.scrollBy(0, step); else el.scrollBy(0, step);
-      scrolled += step;
-      await sleep(randInt(50, 150));
-    }
-    if (win) window.scrollTo(0, document.documentElement.scrollHeight);
-    else el.scrollTo(0, el.scrollHeight);
-
-    // 补派 scroll 事件：rAF 冻结时 IO 型懒加载不会触发，但 scroll 监听型能被唤醒
+  function mayLoadJobs() { return !state.stopFlag && !state.paused; }
+  function listScrollState(scroller) {
+    const { el, win } = scroller;
+    const viewport = Math.max(1, win ? window.innerHeight : el.clientHeight);
+    return { top: win ? window.scrollY || el.scrollTop || 0 : el.scrollTop,
+      max: Math.max(0, el.scrollHeight - viewport), viewport };
+  }
+  function moveJobList(scroller, top) {
+    if (!mayLoadJobs()) return;
+    const { el, win } = scroller;
+    const left = win ? window.scrollX || 0 : el.scrollLeft || 0;
+    top = Math.max(0, Math.min(listScrollState(scroller).max, top));
+    if (win) window.scrollTo({ top, left, behavior: 'instant' });
+    else if (typeof el.scrollTo === 'function') el.scrollTo({ top, left, behavior: 'instant' });
+    else el.scrollTop = top;
+    if (!mayLoadJobs()) return;
     try {
       const target = win ? window : el;
       target.dispatchEvent(new Event('scroll', { bubbles: true }));
-      window.dispatchEvent(new Event('scroll', { bubbles: true }));
+      if (!win) window.dispatchEvent(new Event('scroll', { bubbles: true }));
     } catch (_) {}
-
-    // 轮询等列表变长（后台最多等 12s，前台维持原来的 ~1s 固定等待）
-    const maxWait = isPageHidden() ? 12000 : randInt(800, 1500);
-    let waited = 0;
-    while (waited < maxWait) {
-      const after = win ? document.documentElement.scrollHeight : el.scrollHeight;
-      if (after > before + 10) return true;
-      await sleep(300);
-      waited += 300;
-      // 等待期间再补一次 scroll，给懒加载多一次机会
-      if (waited % 1500 === 0) {
-        try {
-          const target = win ? window : el;
-          target.dispatchEvent(new Event('scroll', { bubbles: true }));
-        } catch (_) {}
-      }
+  }
+  async function waitForMoreJobs(waitMs, pollMs) {
+    const deadline = Date.now() + waitMs;
+    while (mayLoadJobs()) {
+      if (getUnprocessedJobCards().length) return true;
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
     }
     return false;
+  }
+  // 分屏推进并检查真实岗位，避免直接跳过虚拟列表中间尚未处理的岗位。
+  async function scrollToBottom(options = {}) {
+    const scroller = findScrollContainer();
+    const settleMs = options.settleMs ?? 200;
+    const pollMs = options.pollMs ?? 150;
+    const waitMs = options.waitMs ?? (isPageHidden() ? 12000 : 3000);
+    if (!mayLoadJobs()) return false;
+    if (getUnprocessedJobCards().length) return true;
+    if (options.retrigger) {
+      const current = listScrollState(scroller);
+      moveJobList(scroller, current.top - Math.max(120, current.viewport * 0.6));
+      await sleep(settleMs);
+      if (!mayLoadJobs()) return false;
+      if (getUnprocessedJobCards().length) return true;
+    }
+    // 本轮只推进到开始时的末端；广告或详情高度变化不能让滚动无限追赶。
+    const targetBottom = listScrollState(scroller).max;
+    for (let step = 0; step < 60 && mayLoadJobs(); step++) {
+      if (getUnprocessedJobCards().length) return true;
+      const before = listScrollState(scroller);
+      const next = Math.min(targetBottom, before.max, before.top + Math.max(200, before.viewport * 0.8));
+      moveJobList(scroller, next);
+      await sleep(settleMs);
+      if (!mayLoadJobs()) return false;
+      if (getUnprocessedJobCards().length) return true;
+      const after = listScrollState(scroller);
+      if (after.top >= Math.min(targetBottom, after.max) - 2 || after.top <= before.top + 1) break;
+    }
+    return waitForMoreJobs(waitMs, pollMs);
   }
 
   // 人类式"浏览"滚动：每屏多步、随机停顿、偶尔回滚、滚到底再回一点
@@ -2929,6 +3020,11 @@
     t.title = kText + (reason ? '\n' + reason : '');
     t.innerHTML = `${kText}${reason ? `<span class="bh-tag-reason">${escapeHtml(reason)}</span>` : ''}`;
     card.appendChild(t);
+    const processedKey = card.dataset.bhProcessedKey;
+    if (processedKey && state._processedJobs?.has(processedKey) && jobCardKey(card) === processedKey) {
+      if (!state._jobOutcomes) state._jobOutcomes = new Map();
+      state._jobOutcomes.set(processedKey, { kind, reason });
+    }
   }
 
   function escapeHtml(s) {
@@ -5418,6 +5514,9 @@
     state.paused = false;
     state.round = 0;
     state._inBatch = 0;
+    state._processedJobs = new Set();
+    state._jobOutcomes = new Map();
+    state._jobReadRetries = new Map();
     state._aiFailStreak = 0;
     state._aiHits = 0;
     state._aiWarned = false;
@@ -5425,6 +5524,7 @@
     document.querySelectorAll('.bh-tag').forEach((el) => el.remove());
     document.querySelectorAll('[data-bh-processed], [data-bh-processing]').forEach((el) => {
       delete el.dataset.bhProcessed;
+      delete el.dataset.bhProcessedKey;
       delete el.dataset.bhProcessing;
     });
     // 继续累计今日额度；停止、重新开始与刷新均不清零。
@@ -5517,6 +5617,8 @@
   }
 
   async function loop() {
+    if (!state._processedJobs) state._processedJobs = new Set();
+    if (!state._jobReadRetries) state._jobReadRetries = new Map();
     let cfg = state.config;
     let stats = loadStats();
     let stopReason = '';
@@ -5550,12 +5652,13 @@
       }
 
       // 拿未处理卡片
-      const all = qAll('jobCard');
-      const cards = all.filter((c) => !c.dataset.bhProcessed);
+      const cards = getUnprocessedJobCards();
       if (cards.length === 0) {
-        addLog(`第 ${state.round} 轮：无卡片，尝试翻页`);
+        addLog(`第 ${state.round} 轮：当前岗位已处理，正在检查下一批`);
         const loaded = await loadMore();
-        if (!loaded) { addLog('已无更多职位'); stopReason = '已无更多职位'; break; }
+        if (state.stopFlag) { stopReason = '手动停止'; break; }
+        if (state.paused) continue;
+        if (!loaded) { addLog('回滚重试后仍未发现新岗位'); stopReason = '多次加载后未发现新岗位'; break; }
         // 翻页后模拟人类浏览新内容
         if (cfg.autoScroll) {
           const { el, win } = findScrollContainer();
@@ -5584,8 +5687,19 @@
           state.stopFlag = true;
           break;
         }
-        await processOne(card);
-        card.dataset.bhProcessed = '1';
+        const key = jobCardKey(card);
+        if (!key || state._processedJobs.has(key) || !card.isConnected) continue;
+        const processed = await processOne(card);
+        if (jobCardKey(card) !== key) { clearJobCardMarker(card); continue; }
+        if (processed) markJobCardProcessed(card, key);
+        else if (!state.stopFlag && !state.paused) {
+          const retries = (state._jobReadRetries.get(key) || 0) + 1;
+          state._jobReadRetries.set(key, retries);
+          if (retries >= 3) {
+            tagCard(card, 'not-sent', '岗位连续未就绪，可重新开始后重试');
+            markJobCardProcessed(card, key);
+          } else addLog(`岗位尚未就绪，将重试（${retries}/3）`, 'info');
+        }
         // 每处理 batchSize 张就停一会（防风控）
         state._inBatch = (state._inBatch || 0) + 1;
         if (state._inBatch >= (cfg.batchSize || 20)) {
@@ -6098,9 +6212,13 @@
   }
 
   async function processOne(card) {
-    if (state._jobProcessing || state._detailProcessing) return;
+    if (state._jobProcessing || state._detailProcessing) return false;
     state._jobProcessing = true;
-    try { return await processOneInner(card); }
+    try {
+      await processOneInner(card);
+      const tag = card.querySelector('.bh-tag');
+      return !!tag && !tag.classList.contains('bh-tag-ai-pass');
+    }
     catch (error) { if (card?.isConnected) tagCard(card, 'not-sent', '处理异常：' + (error?.message || error)); throw error; }
     finally { state._jobProcessing = false; if (card) delete card.dataset.bhProcessing; }
   }
@@ -6302,18 +6420,27 @@
     logOfficialContactResult(resultContact, title, card);
   }
 
-  async function loadMore() {
-    const r = await scrollToBottom();
-    if (r) return true;
-    // 备选：点"加载更多"按钮
-    const more = qOne('loadMore');
-    if (more && !more.disabled && more.offsetParent !== null) {
-      await humanClick(more);
-      await sleep(humanDelay(1500, 3000));
-      const remaining = qAll('jobCard').filter((c) => !c.dataset.bhProcessed);
-      return remaining.length > 0;
+  async function loadMore(options = {}) {
+    const attempts = Math.max(1, Math.min(5, options.attempts ?? 3));
+    const waitMs = options.waitMs ?? (isPageHidden() ? 12000 : 3000);
+    const pollMs = options.pollMs ?? 150;
+    let clickedMore = false;
+    for (let attempt = 0; attempt < attempts && mayLoadJobs(); attempt++) {
+      if (getUnprocessedJobCards().length) return true;
+      if (attempt) addLog(`没有发现新岗位，向上回滚后重新加载（${attempt + 1}/${attempts}）`);
+      if (await scrollToBottom({ ...options, waitMs, pollMs, retrigger: attempt > 0 })) return true;
+      if (!mayLoadJobs()) return false;
+      const more = !clickedMore && [...document.querySelectorAll(SEL.loadMore.join(','))].find((button) =>
+        !button.disabled && button.getAttribute('aria-disabled') !== 'true' && !button.classList.contains('disabled')
+        && isReadableElement(button) && isVisible(button)
+        && !/没有更多|暂无更多|已到底|全部加载/.test(button.textContent || ''));
+      if (more) {
+        clickedMore = true;
+        if (!await humanClick(more, mayLoadJobs) || !mayLoadJobs()) return false;
+        if (await waitForMoreJobs(waitMs, pollMs)) return true;
+      }
     }
-    return false;
+    return mayLoadJobs() && getUnprocessedJobCards().length > 0;
   }
 
   // ============================================================
@@ -6651,6 +6778,7 @@
       parseActiveDays, parseSalaryK,
       readScopedText, isReadableElement, extractDescription, collectJobDescriptionText, collectText,
       readJobCard, extractJobSnapshot, waitForJobSnapshot, getDetailRoot, matchSnapshotIdentity,
+      collectJobCards, jobCardKey, getUnprocessedJobCards, markJobCardProcessed, findScrollContainer, scrollToBottom, loadMore,
       collectActiveText, collectLiveBadges, publicJobId,
       jobFromSnapshot, jobMatchText, snapshotDiagnostic, snapshotStillCurrent, snapshotChatButton, humanClick, autoChatOnDetail,
       // v1.0.15：HR 实时状态徽标的识别（只认逐字精确的那几个词）

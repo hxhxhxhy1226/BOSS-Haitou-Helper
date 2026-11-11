@@ -42,12 +42,20 @@ async function fixture(t, config = {}, options = {}) {
   Object.defineProperty(win.HTMLElement.prototype, 'offsetHeight', { get() { return 300; } });
   win.Element.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, width: 600, height: 300, right: 600, bottom: 300 });
   win.Element.prototype.getClientRects = function () { return [this.getBoundingClientRect()]; };
-  let height = 2000;
-  Object.defineProperty(doc.documentElement, 'scrollHeight', { get() { return height; } });
-  win.scrollBy = () => { height += 100; };
-  win.scrollTo = () => {};
+  Object.defineProperty(doc.documentElement, 'scrollHeight', { get() { return 2000; } });
+  let scrollY = 0;
+  Object.defineProperty(win, 'scrollY', { get() { return scrollY; } });
+  win.scrollBy = (x, y) => { scrollY = Math.max(0, Math.min(2000 - win.innerHeight, scrollY + (typeof x === 'object' ? x.top || 0 : y || 0))); };
+  win.scrollTo = (x, y) => { scrollY = Math.max(0, Math.min(2000 - win.innerHeight, typeof x === 'object' ? x.top || 0 : y || 0)); };
   // Only expose the existing browse function for an isolated runtime cancellation test.
-  win.eval(source.replace('state, loadConfig, loadStats,', 'state, humanBrowse, loadConfig, loadStats,'));
+  let runtime = source.replace('state, loadConfig, loadStats,', 'state, humanBrowse, loadConfig, loadStats,');
+  if (options.scheduleOnly) {
+    // Keep the real process wrapper, identity bookkeeping and loop. These tests only
+    // replace the site/AI work with an explicit completed screening result.
+    runtime = runtime.replace('  async function processOneInner(card) {',
+      '  async function processOneInner(card) {\n    tagCard(card, "matched", "fixture scheduling only"); return;');
+  }
+  win.eval(runtime);
   await delay(0);
   t.after(() => { win.BH.state.stopFlag = true; win.close(); });
   const input = (name) => doc.querySelector('#boss-helper-panel [data-cfg="' + name + '"]');
@@ -258,12 +266,10 @@ test('reducing the AI daily limit during a failing request prevents the next ret
   assert.match(result.err, /AI次数超限/);
 });
 
-const cards = '<ul class="job-list-wrapper"><li class="job-card-box"><span class="job-name">测试岗位</span></li></ul>';
+const cards = '<ul class="job-list-wrapper"><li class="job-card-box" data-jobid="schedule-first"><a class="job-name" href="/job_detail/schedule-first.html">测试岗位</a></li></ul>';
 test('one round remains one round after Start; batch size and pause reach the actual loop timer', async (t) => {
   const f = await fixture(t, { autoSend: false, autoScroll: false, maxRounds: 1, batchSize: 1, batchPauseSec: 2,
-    minDelay: 0.5, maxDelay: 0.5 }, { html: cards, fastTimers: true });
-  // A busy card extractor isolates loop scheduling from site selectors and all external sends.
-  f.BH.state._jobProcessing = true;
+    minDelay: 0.5, maxDelay: 0.5 }, { html: cards, fastTimers: true, scheduleOnly: true });
   f.action('toggle');
   await until(() => f.BH.state._loopActive === false);
   assert.equal(f.BH.state.config.maxRounds, 1);
@@ -276,10 +282,19 @@ test('one round remains one round after Start; batch size and pause reach the ac
 
 test('page delay fields reach the actual loop wait after loading more cards', async (t) => {
   const f = await fixture(t, { autoSend: false, autoScroll: false, maxRounds: 2, pageDelayMin: 24, pageDelayMax: 24,
-    minDelay: 0.5, maxDelay: 0.5 }, { html: cards, fastTimers: true });
-  f.BH.state._jobProcessing = true;
+    minDelay: 0.5, maxDelay: 0.5 }, { html: cards, fastTimers: true, scheduleOnly: true });
+  let appended = false;
+  f.win.addEventListener('scroll', () => {
+    if (appended) return;
+    appended = true;
+    f.doc.querySelector('.job-list-wrapper').insertAdjacentHTML('beforeend',
+      '<li class="job-card-box" data-jobid="schedule-next"><a class="job-name" href="/job_detail/schedule-next.html">下一页岗位</a></li>');
+  });
   f.action('toggle');
   await until(() => f.BH.state._loopActive === false);
+  assert.equal(appended, true, 'A real new job must appear after the list scroll trigger');
+  assert.equal(f.doc.documentElement.scrollHeight, 2000, 'Loading can succeed without document-height growth');
+  assert.ok(f.doc.querySelector('[data-jobid="schedule-next"]'));
   assert.ok(f.timers.includes(24000), 'Configured page delay must reach CLOCK.sleep as a finite duration');
   assert.ok(f.timers.every(Number.isFinite));
   assert.equal(f.requests.length, 0);
@@ -287,8 +302,7 @@ test('page delay fields reach the actual loop wait after loading more cards', as
 
 test('Stop followed immediately by Start cannot revive a loop that is still unwinding', async (t) => {
   const f = await fixture(t, { autoSend: false, autoScroll: false, maxRounds: 1,
-    minDelay: 0.5, maxDelay: 0.5 }, { html: cards, fastTimers: true });
-  f.BH.state._jobProcessing = true;
+    minDelay: 0.5, maxDelay: 0.5 }, { html: cards, fastTimers: true, scheduleOnly: true });
   const originalSleep = f.BH.CLOCK.sleep;
   let resumeSleep;
   f.BH.CLOCK.sleep = () => new Promise((resolve) => { resumeSleep = resolve; });

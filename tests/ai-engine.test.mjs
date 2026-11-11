@@ -1834,12 +1834,10 @@ section('33. 后台保活：窗口不用放最前面也能投递（v1.0.16）');
   ok('processOne 视口校验在后台重试 3 次，前台为 1 次',
      /const viewportTries = isPageHidden\(\) \? 3 : 1/.test(code));
 
-  // 33f. 滚动加载：补派 scroll 事件（IO 型懒加载在后台不触发）+ 轮询等列表变长
-  ok('scrollToBottom 补派 scroll 事件唤醒 scroll 监听型懒加载',
+  // 33f. 保留滚动通知的接线检查。新岗位身份、固定高度列表和有界重试的
+  // 行为由 list-loading.test.mjs 覆盖，不再把旧的高度增长/短等待实现写死。
+  ok('列表加载补派 scroll 事件唤醒 scroll 监听型懒加载',
      /dispatchEvent\(new Event\('scroll'/.test(code));
-  ok('scrollToBottom 改成轮询 scrollHeight 而不是死等固定时长',
-     /const maxWait = isPageHidden\(\) \? 12000/.test(code) && /while \(waited < maxWait\)/.test(code));
-  ok('后台给滚动加载最多 12s 等待窗口', /isPageHidden\(\) \? 12000 : randInt\(800, 1500\)/.test(code));
 
   // 33g. 面板状态条 + 接线
   ok('面板新增后台状态条 [data-bgstate]', /data-bgstate/.test(code));

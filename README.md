@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="extension/manifest.json"><img src="https://img.shields.io/badge/version-1.1.2-168AAD?style=flat-square" alt="版本 1.1.2"></a>
+  <a href="extension/manifest.json"><img src="https://img.shields.io/badge/version-1.1.3-168AAD?style=flat-square" alt="版本 1.1.3"></a>
   <img src="https://img.shields.io/badge/Microsoft_Edge-Extension-0078D7?style=flat-square" alt="Microsoft Edge 独立扩展">
   <img src="https://img.shields.io/badge/Manifest-V3-2BAE83?style=flat-square" alt="Manifest V3">
   <a href="https://github.com/hxhxhxhy1226/BOSS-Haitou-Helper/stargazers"><img src="https://img.shields.io/github/stars/hxhxhxhy1226/BOSS-Haitou-Helper?style=flat-square&amp;color=E6A23C" alt="GitHub Stars"></a>
@@ -66,6 +66,8 @@ AI 通过后会继续定位当前岗位的“立即沟通”按钮；页面重�
 ## AI 筛选
 
 AI 为可选功能。关闭 AI 即可使用本地规则筛选，无需授权 AI 服务域名。
+
+列表按批次补加载：先处理当前已有的新岗位，再分屏向下滚动；没有新增时向上回滚一段、重新到底并等待，连续三轮检查后才停止。加载依据是实际未处理岗位，页面高度不变或卡片节点被复用也能继续。同一岗位重新显示时会恢复原有完成或跳过标签。
 
 1. 打开岗位页面板的“AI 设置”，填写 OpenAI 兼容的 **Chat Completions** 接口地址、API Key 和模型。地址填到 `/v1` 时会自动补全路径。
 2. 填写求职画像，描述目标岗位、技术方向及明确的筛选条件。
@@ -139,13 +141,13 @@ npm run build
 
 | 输出 | 用途 |
 | --- | --- |
-| `dist/boss-helper-edge-1.1.2/` | 可直接加载到 Edge 的扩展目录。 |
-| `dist/boss-helper-edge-1.1.2.zip` | 安装包，解压后加载。 |
-| `dist/boss-helper-edge-1.1.2-github.zip` | 源码、测试、依赖锁文件和 GitHub Actions。 |
+| `dist/boss-helper-edge-1.1.3/` | 可直接加载到 Edge 的扩展目录。 |
+| `dist/boss-helper-edge-1.1.3.zip` | 安装包，解压后加载。 |
+| `dist/boss-helper-edge-1.1.3-github.zip` | 源码、测试、依赖锁文件和 GitHub Actions。 |
 
 Windows 安装了 Edge 时，可运行 `npm run test:edge`。它在独立测试目录中加载真正的扩展，通过本地模拟页面检查注入、保存、额度、停止和工具栏功能；`EDGE_BINARY` 可指定 Edge 可执行文件路径。
 
-当前 **1.1.2** 修复成功弹窗识别、关闭顺序和完成标签，Edge 实际加载的 16 项本地模拟检查通过。`check` 校验 Manifest V3、资源引用、JavaScript 语法与版本一致性；GitHub Actions 执行依赖安装、检查、测试与打包。具体结果与范围见 [验证报告](VALIDATION.md)，版本变化见 [更新记录](CHANGELOG.md)。
+当前 **1.1.3** 修复列表仍有岗位却提前停止，列表加载与记账的 15 项回归、Edge 实际加载的 19 项本地模拟检查通过。`check` 校验 Manifest V3、资源引用、JavaScript 语法与版本一致性；GitHub Actions 执行依赖安装、检查、测试与打包。具体结果与范围见 [验证报告](VALIDATION.md)，版本变化见 [更新记录](CHANGELOG.md)。
 
 正式图标位于 `extension/icons/`，公文包图标的可编辑源和 512px 原图位于 `design/briefcase/`。扩展运行只使用打包后的本地代码，开发依赖和图标生成工具不进入运行包。
 

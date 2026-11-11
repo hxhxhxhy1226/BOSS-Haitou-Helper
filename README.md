@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="extension/manifest.json"><img src="https://img.shields.io/badge/version-1.1.1-168AAD?style=flat-square" alt="版本 1.1.1"></a>
+  <a href="extension/manifest.json"><img src="https://img.shields.io/badge/version-1.1.2-168AAD?style=flat-square" alt="版本 1.1.2"></a>
   <img src="https://img.shields.io/badge/Microsoft_Edge-Extension-0078D7?style=flat-square" alt="Microsoft Edge 独立扩展">
   <img src="https://img.shields.io/badge/Manifest-V3-2BAE83?style=flat-square" alt="Manifest V3">
   <a href="https://github.com/hxhxhxhy1226/BOSS-Haitou-Helper/stargazers"><img src="https://img.shields.io/github/stars/hxhxhxhy1226/BOSS-Haitou-Helper?style=flat-square&amp;color=E6A23C" alt="GitHub Stars"></a>
@@ -57,7 +57,9 @@
 
 请先在 **BOSS 直聘手机 App** 中设置账号的默认打招呼语。助手点击网页的官方“立即沟通”按钮，由 BOSS 使用该账号默认内容；扩展不覆盖话术，也不追加自定义消息。
 
-AI 通过后会继续定位当前岗位的“立即沟通”按钮；页面重建同岗位按钮时会重新定位，点击前停止或岗位内容改变时会撤销本次占额。卡片显示最终状态：“已发送”表示官方确认，“待确认”表示已点击但尚无回执，“未投递”会列出中断原因；鼠标悬停可查看完整原因。
+AI 通过后会继续定位当前岗位的“立即沟通”按钮；页面重建同岗位按钮时会重新定位，点击前停止或岗位内容改变时会撤销本次占额。出现“已向BOSS发送消息”等明确提示，或本次按钮变为“继续沟通”时，卡片显示绿色“完成”。助手先点击成功框里的“留在此页”，等待弹窗关闭，再处理下一家；无法关闭时停止推进，保留已经完成的结果。鼠标悬停可查看完整说明。
+
+尚无官方回执时会临时显示“待确认”；最近一笔投递在一分钟内收到迟到回执时，会更新原卡片并清理成功弹窗，用户已停止运行也能完成这一步。
 
 “已发起”记录的是助手发起的沟通操作。结果待确认时仍保留占额和去重记录，实际内容与送达状态以 BOSS 消息页为准。旧版本留下的待确认记录无法仅凭按钮文字判断是否发送，不会自动清除后重复投递。
 
@@ -137,13 +139,13 @@ npm run build
 
 | 输出 | 用途 |
 | --- | --- |
-| `dist/boss-helper-edge-1.1.1/` | 可直接加载到 Edge 的扩展目录。 |
-| `dist/boss-helper-edge-1.1.1.zip` | 安装包，解压后加载。 |
-| `dist/boss-helper-edge-1.1.1-github.zip` | 源码、测试、依赖锁文件和 GitHub Actions。 |
+| `dist/boss-helper-edge-1.1.2/` | 可直接加载到 Edge 的扩展目录。 |
+| `dist/boss-helper-edge-1.1.2.zip` | 安装包，解压后加载。 |
+| `dist/boss-helper-edge-1.1.2-github.zip` | 源码、测试、依赖锁文件和 GitHub Actions。 |
 
 Windows 安装了 Edge 时，可运行 `npm run test:edge`。它在独立测试目录中加载真正的扩展，通过本地模拟页面检查注入、保存、额度、停止和工具栏功能；`EDGE_BINARY` 可指定 Edge 可执行文件路径。
 
-当前 **1.1.1** 包含模型配置保存提示与投递执行修复，功能回归覆盖 251 项自动化用例，Edge 实际加载的 14 项本地模拟检查通过。`check` 校验 Manifest V3、资源引用、JavaScript 语法与版本一致性；GitHub Actions 执行依赖安装、检查、测试与打包。具体结果与范围见 [验证报告](VALIDATION.md)，版本变化见 [更新记录](CHANGELOG.md)。
+当前 **1.1.2** 修复成功弹窗识别、关闭顺序和完成标签，Edge 实际加载的 16 项本地模拟检查通过。`check` 校验 Manifest V3、资源引用、JavaScript 语法与版本一致性；GitHub Actions 执行依赖安装、检查、测试与打包。具体结果与范围见 [验证报告](VALIDATION.md)，版本变化见 [更新记录](CHANGELOG.md)。
 
 正式图标位于 `extension/icons/`，公文包图标的可编辑源和 512px 原图位于 `design/briefcase/`。扩展运行只使用打包后的本地代码，开发依赖和图标生成工具不进入运行包。
 

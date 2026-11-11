@@ -51,8 +51,10 @@ async function fixture(t, { detail = false } = {}) {
   button.addEventListener('click', (event) => event.preventDefault());
   const addNotice = (text, attrs = '') => {
     const host = doc.createElement('div');
-    host.innerHTML = `<div class="boss-dialog__wrapper" ${attrs}><div class="dialog-title">${text}</div></div>`;
-    const notice = host.firstElementChild; doc.body.append(notice); return notice;
+    host.innerHTML = `<div class="boss-dialog__wrapper" ${attrs}><div class="dialog-title">${text}</div><button class="default-btn cancel-btn">留在此页</button></div>`;
+    const notice = host.firstElementChild;
+    notice.querySelector('.cancel-btn').addEventListener('click', () => notice.remove());
+    doc.body.append(notice); return notice;
   };
   return { win, doc, BH, button, addNotice, context: () => BH.captureOfficialContactContext(JOB, button),
     logs: () => doc.querySelector('.bh-log')?.textContent || '' };
@@ -61,10 +63,167 @@ async function fixture(t, { detail = false } = {}) {
 test('本次新出现的可见官方成功弹窗可以确认，并只定位该弹窗内的留在此页', async (t) => {
   const f = await fixture(t), before = f.context();
   const notice = f.addNotice('已向BOSS发送消息');
-  const stay = f.doc.createElement('button'); stay.textContent = '留在此页'; notice.append(stay);
+  const stay = notice.querySelector('.cancel-btn');
   const result = f.BH.readOfficialContactResult(before);
   assert.equal(result.status, 'confirmed');
   assert.equal(result.stay, stay);
+});
+
+function customSuccessDialog(f) {
+  const dialog = f.doc.createElement('section');
+  dialog.className = 'greet-dialog';
+  dialog.innerHTML = `<header><h3 class="title"><span>已</span><span>向</span><b>BOSS</b><span>发</span><span>送消息</span></h3></header>
+    <div class="greet-preview">${'这是本次打招呼内容的长预览。'.repeat(120)}</div>
+    <footer><button class="default-btn cancel-btn"><span>留在此页</span></button><button class="continue-btn">继续沟通</button></footer>`;
+  f.doc.body.append(dialog);
+  return dialog;
+}
+
+test('自定义成功弹窗的拆分标题和长消息预览仍能确认，并定位同框留在此页', async (t) => {
+  const f = await fixture(t), before = f.context();
+  const outside = f.doc.createElement('button'); outside.textContent = '留在此页'; f.doc.body.append(outside);
+  const dialog = customSuccessDialog(f);
+  assert.ok(dialog.textContent.length > 1000, '模拟实际长招呼语，不能按整框文字长度丢掉标题回执');
+  const result = f.BH.readOfficialContactResult(before);
+  assert.equal(result?.status, 'confirmed');
+  assert.equal(result.stay, dialog.querySelector('.cancel-btn'));
+  assert.notEqual(result.stay, outside);
+});
+
+test('回执出现时正文暂时清空，同岗位页头可核验即可确认成功', async (t) => {
+  const f = await fixture(t), before = f.context();
+  f.doc.querySelector('.job-sec-text').textContent = '';
+  assert.equal(f.BH.extractJobSnapshot(JOB).ok, false, '确认本场景没有可供重读的完整 JD');
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+});
+
+test('成功弹窗暂时隐藏原详情时，不能因原详情不可见漏掉本次官方回执', async (t) => {
+  const f = await fixture(t), before = f.context();
+  f.doc.querySelector('.job-detail').hidden = true;
+  assert.equal(f.BH.extractJobSnapshot(JOB).ok, false);
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+});
+
+test('旧自定义成功弹窗的消息预览或按钮更新，不能冒充本次新回执', async (t) => {
+  const f = await fixture(t), dialog = customSuccessDialog(f);
+  const before = f.context();
+  dialog.querySelector('.greet-preview').textContent = '仅更新原有消息预览';
+  dialog.querySelector('.continue-btn').textContent = '继续沟通 (2)';
+  assert.equal(f.BH.readOfficialContactResult(before), null);
+});
+
+test('同岗位仅更新查询参数时，本次成功回执仍可确认', async (t) => {
+  const f = await fixture(t), before = f.context();
+  f.win.history.replaceState({}, '', '/web/geek/job?query=firmware&securityId=fixture');
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+});
+
+test('原职位 ID 消失且标题公司已换岗时，不能把新成功框归给原岗位', async (t) => {
+  const f = await fixture(t), before = f.context();
+  f.doc.querySelector('.job-detail').removeAttribute('data-jobid');
+  f.doc.querySelector('.job-detail-link').removeAttribute('href');
+  f.doc.querySelector('.job-name').textContent = '销售客户经理';
+  f.doc.querySelector('.company-name').textContent = '另一家测试公司';
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before), null);
+});
+
+test('旧成功弹窗只重建标题节点，不能制造本次新回执', async (t) => {
+  const f = await fixture(t), notice = f.addNotice('已向BOSS发送消息');
+  const before = f.context(), title = notice.querySelector('.dialog-title');
+  title.replaceWith(title.cloneNode(true));
+  assert.equal(f.BH.readOfficialContactResult(before), null);
+});
+
+test('按钮先变继续沟通、成功框晚一百毫秒挂载，仍等待并关闭该框', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let dialog, timer, closed = 0;
+  t.after(() => clearTimeout(timer));
+  f.button.addEventListener('click', () => {
+    f.button.textContent = '继续沟通';
+    timer = setTimeout(() => {
+      dialog = customSuccessDialog(f);
+      dialog.querySelector('.cancel-btn').addEventListener('click', () => { closed++; dialog.remove(); });
+    }, 100);
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.ok(dialog, '按钮状态先到不能跳过下一次渲染的成功弹窗');
+  assert.equal(closed, 1);
+  assert.equal(dialog.isConnected, false);
+  assert.equal(result.dialogClosed, true);
+  assert.equal(f.BH.loadStats().sent, 1);
+});
+
+test('留在此页触发同框重建时，继续关闭新框并等到它消失', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let oldDialog, replacement, closeCalls = 0;
+  f.button.addEventListener('click', () => {
+    oldDialog = customSuccessDialog(f);
+    oldDialog.querySelector('.cancel-btn').addEventListener('click', () => {
+      closeCalls++;
+      replacement = oldDialog.cloneNode(true);
+      replacement.querySelector('.cancel-btn').addEventListener('click', () => { closeCalls++; replacement.remove(); });
+      oldDialog.replaceWith(replacement);
+    });
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.dialogClosed, true);
+  assert.equal(closeCalls, 2);
+  assert.ok(replacement);
+  assert.equal(replacement.isConnected, false);
+  assert.equal(f.doc.querySelector('.greet-dialog'), null);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+for (const failure of ['no-op', 'throw']) {
+  test(`留在此页 ${failure} 时使用同框关闭按钮，保留成功状态`, { timeout: 8000 }, async (t) => {
+    const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+    let dialog, stayCalls = 0, iconCalls = 0, outsideCalls = 0;
+    const outside = f.doc.createElement('button'); outside.className = 'icon-close'; outside.textContent = '×';
+    outside.addEventListener('click', () => outsideCalls++); f.doc.body.append(outside);
+    f.button.addEventListener('click', () => {
+      dialog = customSuccessDialog(f);
+      dialog.querySelector('.cancel-btn').click = () => {
+        stayCalls++;
+        if (failure === 'throw') throw new Error('fixture stay action failed');
+      };
+      const icon = f.doc.createElement('button'); icon.className = 'icon-close'; icon.setAttribute('aria-label', '关闭'); icon.textContent = '×';
+      icon.addEventListener('click', () => { iconCalls++; dialog.remove(); }); dialog.prepend(icon);
+    });
+    const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+    assert.equal(result.status, 'confirmed');
+    assert.equal(result.dialogClosed, true);
+    assert.equal(stayCalls, 1);
+    assert.equal(iconCalls, 1);
+    assert.equal(outsideCalls, 0);
+    assert.equal(dialog.isConnected, false);
+    assert.equal(f.BH.state.stopFlag, false);
+  });
+}
+
+test('成功框的留在此页与关闭按钮均失效时停止后续处理，仍保留已完成状态', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let dialog;
+  f.button.addEventListener('click', () => {
+    dialog = customSuccessDialog(f);
+    const icon = f.doc.createElement('button'); icon.className = 'icon-close'; icon.textContent = '×';
+    icon.click = () => { throw new Error('fixture close action failed'); };
+    dialog.prepend(icon);
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed', '关闭弹窗失败不能撤销已确认的发送结果');
+  assert.equal(result.dialogClosed, false);
+  assert.equal(dialog.isConnected, true);
+  assert.equal(f.BH.state.stopFlag, true);
+  assert.match(f.logs(), /投递已完成.*成功弹窗未关闭/);
+  assert.doesNotMatch(f.logs(), /未投递|未发起沟通/);
+  assert.equal(f.BH.loadStats().sent, 1);
+  assert.equal(await f.BH.reserveDelivery(JOB.jobId, 10), false, '不能因关闭失败重新联系同一岗位');
 });
 
 test('官方回执延迟超过四秒才出现，默认等待仍确认招呼已发送', { timeout: 8000 }, async (t) => {

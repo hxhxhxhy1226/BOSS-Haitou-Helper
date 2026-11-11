@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.1 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.2 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -547,10 +547,10 @@
     } catch (_) { return ''; }
   }
 
-  function scopeJobIdentity(root, allowCard = false) {
+  function scopeJobIdentity(root, allowCard = false, includeHidden = false) {
     if (!root?.querySelectorAll) return { jobId: '', dataJobId: '', ambiguous: false };
     const ids = new Set(), dataIds = new Set();
-    const allowed = (el) => isReadableElement(el) && !el.closest(JD_RECOMMEND_SEL)
+    const allowed = (el) => (includeHidden || isReadableElement(el)) && !el.closest(JD_RECOMMEND_SEL)
       && !isInsideHelperPanel(el) && (allowCard || !isForeignText(el));
     const links = [...(root.matches?.('a[href]') ? [root] : []), ...root.querySelectorAll('a[href*="/job_detail/"]')];
     for (const link of links) {
@@ -2917,7 +2917,7 @@
     const t = document.createElement('div');
     t.className = 'bh-tag bh-tag-' + kind;
     const kText = {
-      pass: '✅ 已发送',
+      pass: '✅ 完成',
       skip: '❌ 跳过',
       info: '⏭ 已沟通过',
       'ai-pass': '🤖 AI 通过',
@@ -5421,6 +5421,7 @@
     state._aiFailStreak = 0;
     state._aiHits = 0;
     state._aiWarned = false;
+    state._pendingContactCleanup?.();
     document.querySelectorAll('.bh-tag').forEach((el) => el.remove());
     document.querySelectorAll('[data-bh-processed], [data-bh-processing]').forEach((el) => {
       delete el.dataset.bhProcessed;
@@ -5797,26 +5798,64 @@
   // 只把本次点击后新出现的官方提示、或当前职位按钮的状态变化视为确认。
   // 面板日志、职位正文、旧弹窗与跳到聊天页本身，都不能证明本次招呼已发送。
   const CONTACT_NOTICE_SEL = '.boss-dialog__wrapper, .boss-dialog, .dialog-wrap, .dialog-container, .dialog, .modal, [role="dialog"], .dialog-title, .modal-title, .toast, .toast-message, .message-tip, [role="alert"], [role="status"]';
+  const CONTACT_DIALOG_SEL = '.boss-dialog__wrapper, .boss-dialog, .dialog-wrap, .dialog-container, .dialog, .modal, [role="dialog"], .greet-dialog, .greet-boss-dialog';
+  const CONTACT_TITLE_SEL = 'h1, h2, h3, h4, h5, h6, .title, [class*="title"], [class*="header"]';
+  const CONTACT_CONTROL_SEL = 'button, a, [role="button"], .default-btn';
   const CONTACT_SUCCESS_RE = /已向\s*BOSS\s*发送消息|打招呼成功|消息已发送|沟通成功|招呼已发送|已发送招呼|已成功打招呼/i;
   const CONTACT_FAILURE_RE = /沟通失败|发送失败|(?:今日|每天|每日).{0,20}(?:沟通|打招呼).{0,20}(?:上限|用完)|操作过于频繁|请稍后再试|请先登录|登录失效/;
   function contactNoticeSignature(text) {
-    const failure = text.match(CONTACT_FAILURE_RE);
+    const compact = String(text || '').replace(/\s+/g, '');
+    const failure = compact.match(CONTACT_FAILURE_RE);
     if (failure) return 'rejected:' + failure[0];
-    const success = text.match(CONTACT_SUCCESS_RE);
+    const success = compact.match(CONTACT_SUCCESS_RE);
     return success ? 'confirmed:' + success[0] : '';
   }
   function contactNoticeText(el) {
     if (!el?.isConnected || !isReadableElement(el) || !isVisible(el)
       || el.closest('#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm, ' + JOB_CARD_SEL + ', ' + JD_BODY_SEL)) return '';
+    // 优先读取官方标题，消息预览可能很长，也可能包含“发送失败”等用户自己的文字。
+    const headings = [...(el.matches(CONTACT_TITLE_SEL) ? [el] : []), ...el.querySelectorAll(CONTACT_TITLE_SEL)];
+    for (const heading of headings) {
+      if (!isReadableElement(heading) || !isVisible(heading) || heading.closest(JOB_CARD_SEL + ', ' + JD_BODY_SEL)) continue;
+      const title = heading.textContent.replace(/\s+/g, ' ').trim();
+      if (title.length <= 160 && contactNoticeSignature(title)) return title;
+    }
     const parts = [];
     const walk = (node) => {
       if (node.nodeType === 3) { parts.push(node.nodeValue || ''); return; }
-      if (node.nodeType !== 1 || !isReadableElement(node) || node.matches('script, style, textarea, input, #boss-helper-panel, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm')) return;
+      if (node.nodeType !== 1 || !isReadableElement(node) || node.matches('script, style, textarea, input, #boss-helper-panel, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm, ' + JOB_CARD_SEL + ', ' + JD_BODY_SEL)) return;
       for (const child of node.childNodes) walk(child);
     };
     walk(el);
     const value = parts.join(' ').replace(/\s+/g, ' ').trim();
     return value.length <= 1000 ? value : '';
+  }
+  function contactStayButton(root) {
+    return [...root.querySelectorAll(CONTACT_CONTROL_SEL)].find((el) =>
+      (el.textContent || '').replace(/\s+/g, '') === '留在此页' && isReadableElement(el) && isVisible(el));
+  }
+  function contactDialogFor(notice) {
+    // 标题和按钮可能在不同兄弟区域；只找局部弹窗，不把 body 或职位面板当弹窗。
+    const known = notice.closest(CONTACT_DIALOG_SEL);
+    for (let node = notice, level = 0; node && !['BODY', 'HTML'].includes(node.tagName) && level < 7; node = node.parentElement, level++) {
+      if (node.matches(JOB_CARD_SEL + ', ' + JD_BODY_SEL + ', #boss-helper-panel')) break;
+      if (contactStayButton(node)) return node;
+      if (node === known) return node;
+    }
+    return known || null;
+  }
+  function contactNoticeElements() {
+    const found = new Set(document.querySelectorAll(CONTACT_NOTICE_SEL + ', ' + CONTACT_DIALOG_SEL));
+    // 兼容未提供 role 或固定类名的成功框，以明确标题 + “留在此页”组合定位。
+    for (const control of document.querySelectorAll(CONTACT_CONTROL_SEL)) {
+      if ((control.textContent || '').replace(/\s+/g, '') !== '留在此页'
+        || control.closest('#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, ' + JOB_CARD_SEL + ', ' + JD_BODY_SEL)) continue;
+      for (let node = control.parentElement, level = 0; node && !['BODY', 'HTML'].includes(node.tagName) && level < 6; node = node.parentElement, level++) {
+        if (node.matches(JOB_CARD_SEL + ', ' + JD_BODY_SEL)) break;
+        if (contactNoticeSignature(contactNoticeText(node))) { found.add(node); break; }
+      }
+    }
+    return [...found];
   }
   function captureOfficialContactContext(expected, button) {
     const snapshot = extractJobSnapshot(expected);
@@ -5826,34 +5865,47 @@
         for (const el of root.querySelectorAll(selector)) buttons.set(el, (el.textContent || '').trim());
       }
     }
-    return { expected, button, buttons, href: location.href,
-      notices: new Map([...document.querySelectorAll(CONTACT_NOTICE_SEL)].map((el) => [el, contactNoticeSignature(contactNoticeText(el))])) };
+    return { expected: { ...expected }, identity: snapshot, button, buttons, href: location.href,
+      roots: [...new Set([snapshot.headerRoot, snapshot.root].filter(Boolean))],
+      notices: new Map(contactNoticeElements().map((el) => [el, contactNoticeSignature(contactNoticeText(el))])) };
+  }
+  function contactContextCurrent(context) {
+    if (!context?.identity?.ok) return false;
+    const before = new URL(context.href), current = new URL(location.href);
+    if (current.origin !== before.origin || current.pathname !== before.pathname) return false;
+    const expected = context.identity;
+    // 提交前已经验证完整 JD。回执只核对岗位身份，背景被弹窗隐藏或正文刷新不等于换岗。
+    const identities = [selectedCardIdentity(), extractJobSnapshot(context.expected),
+      ...context.roots.filter((root) => root.isConnected).map((root) => scopeJobIdentity(root, false, true))];
+    return !identities.filter(Boolean).some((identity) => {
+      if (identity.ambiguous || expected.jobId && identity.jobId && expected.jobId !== identity.jobId
+        || expected.dataJobId && identity.dataJobId && expected.dataJobId !== identity.dataJobId) return true;
+      const sameId = expected.jobId && identity.jobId === expected.jobId
+        || expected.dataJobId && identity.dataJobId === expected.dataJobId;
+      return !sameId && identity.title && !identityTextMatches(identity.title, expected.title);
+    });
   }
   function readOfficialContactResult(context) {
-    if (!context) return null;
-    // 导航到另一岗位或聊天页面后，不把该页面的提示归到原岗位。
-    if (location.href !== context.href) return null;
+    if (!contactContextCurrent(context)) return null;
     const snapshot = extractJobSnapshot(context.expected);
-    if (!snapshot.ok || !matchSnapshotIdentity(snapshot, context.expected).ok) return null;
-    const fresh = [...document.querySelectorAll(CONTACT_NOTICE_SEL)]
-      .map((el) => ({ el, text: contactNoticeText(el) }))
-      .filter(({ el, text }) => contactNoticeSignature(text) && contactNoticeSignature(text) !== context.notices.get(el));
-    const failed = fresh.find(({ text }) => CONTACT_FAILURE_RE.test(text));
+    const fresh = contactNoticeElements()
+      .map((el) => { const text = contactNoticeText(el); return { el, text, signature: contactNoticeSignature(text), dialog: contactDialogFor(el) }; })
+      .filter(({ el, signature, dialog }) => signature && signature !== context.notices.get(el)
+        && (!dialog || signature !== context.notices.get(dialog)));
+    const failed = fresh.find(({ signature }) => signature.startsWith('rejected:'));
     if (failed) return { status: 'rejected', reason: failed.text, notice: failed.el };
-    const sent = fresh.find(({ text }) => CONTACT_SUCCESS_RE.test(text));
+    const sent = fresh.find(({ signature }) => signature.startsWith('confirmed:'));
     if (sent) {
-      const dialog = sent.el.closest('.boss-dialog__wrapper, .boss-dialog, .dialog-wrap, .dialog-container, .dialog, .modal, [role="dialog"]') || sent.el;
-      const stay = [...dialog.querySelectorAll('button, a, .default-btn')]
-        .find((el) => (el.textContent || '').trim() === '留在此页' && isReadableElement(el) && isVisible(el));
-      return { status: 'confirmed', reason: sent.text, notice: sent.el, stay };
+      const dialog = sent.dialog;
+      return { status: 'confirmed', reason: sent.text, notice: sent.el, dialog, stay: dialog && contactStayButton(dialog) };
     }
-    if (snapshot.ok && matchSnapshotIdentity(snapshot, context.expected).ok) {
-      for (const root of new Set([snapshot.headerRoot, snapshot.root].filter(Boolean))) {
+    {
+      for (const root of new Set([...context.roots, snapshot.headerRoot, snapshot.root].filter((root) => root?.isConnected))) {
         for (const selector of SEL.detailChatBtn) {
           const continued = [...root.querySelectorAll(selector)].find((el) => detailElementAllowed(el)
             && context.buttons.get(el) !== (el.textContent || '').trim()
             && /^(继续沟通|继续聊|进入沟通)$/.test((el.textContent || '').trim()));
-          if (continued) return { status: 'confirmed', reason: '当前职位按钮已变为“' + continued.textContent.trim() + '”' };
+          if (continued) return { status: 'confirmed', reason: '当前职位按钮已变为“' + continued.textContent.trim() + '”', button: continued };
         }
       }
     }
@@ -5864,10 +5916,86 @@
     do {
       const result = readOfficialContactResult(context);
       if (result) return result;
-      if (state.stopFlag || state.paused || !context || location.href !== context.href || Date.now() >= until) break;
+      if (state.stopFlag || state.paused || !contactContextCurrent(context) || Date.now() >= until) break;
       await sleep(200);
     } while (true);
     return { status: 'unconfirmed', reason: '尚未收到当前职位的官方成功提示，请在 BOSS 消息中核对' };
+  }
+  async function dismissOfficialContactDialog(result, context) {
+    // 按钮状态可能先更新，成功框在下一次页面渲染才出现；等待它挂载后再清理。
+    if (!result.dialog && result.button) {
+      const deadline = Date.now() + 1000;
+      while (Date.now() < deadline && contactContextCurrent(context)) {
+        const next = readOfficialContactResult(context);
+        if (next?.status === 'rejected') { Object.assign(result, next); return false; }
+        if (next?.dialog) { Object.assign(result, next); break; }
+        await sleep(100);
+      }
+    }
+    let dialog = result.dialog;
+    if (!dialog) return true; // 成功 toast 或按钮状态变化没有阻挡页面的弹窗。
+    const visible = () => {
+      if (dialog.isConnected && isReadableElement(dialog) && isVisible(dialog)) return true;
+      const next = readOfficialContactResult(context);
+      if (next?.status === 'confirmed' && next.dialog && next.dialog !== dialog) {
+        dialog = result.dialog = next.dialog;
+        return dialog.isConnected && isReadableElement(dialog) && isVisible(dialog);
+      }
+      return false;
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (!contactContextCurrent(context)) return false;
+      if (visible()) {
+        const stay = contactStayButton(dialog);
+        const icon = [...dialog.querySelectorAll('[aria-label="关闭"], [aria-label="Close"], [data-act="close"], .dialog-close, .close-dialog, .close-icon, .icon-close, .close')]
+          .find((el) => isReadableElement(el) && isVisible(el));
+        const close = attempt === 0 ? stay || icon : icon || stay;
+        try { if (close) close.click(); }
+        catch (error) { result.closeError = String(error?.message || error); }
+      }
+      const deadline = Date.now() + 1200;
+      let hiddenSince = 0;
+      while (Date.now() < deadline) {
+        if (visible()) hiddenSince = 0;
+        else if (!hiddenSince) hiddenSince = Date.now();
+        else if (Date.now() - hiddenSince >= 200) return true;
+        await sleep(100);
+      }
+    }
+    return false;
+  }
+  function watchPendingContactResult(result, title, card) {
+    if (!card || !result.context) return;
+    state._pendingContactCleanup?.();
+    let timer = null, expiry = null, disposed = false;
+    const cleanup = () => {
+      disposed = true; observer.disconnect(); clearTimeout(timer); clearTimeout(expiry);
+      if (state._pendingContactCleanup === cleanup) state._pendingContactCleanup = null;
+    };
+    const check = async () => {
+      timer = null;
+      if (disposed) return;
+      const identity = scopeJobIdentity(card, true, true), expected = result.context.identity;
+      if (!card.isConnected || !card.querySelector('.bh-tag-pending')
+        || identity.jobId && expected.jobId && identity.jobId !== expected.jobId
+        || identity.dataJobId && expected.dataJobId && identity.dataJobId !== expected.dataJobId) { cleanup(); return; }
+      const late = readOfficialContactResult(result.context);
+      if (!late) return;
+      cleanup();
+      logOfficialContactResult(late, title, card);
+      if (late.status === 'confirmed') {
+        let closed = false;
+        try { closed = await dismissOfficialContactDialog(late, result.context); } catch (_) {}
+        if (!closed) stop('投递已完成，但成功弹窗尚未关闭；关闭弹窗后再继续');
+      } else if (late.status === 'rejected') stop('BOSS 未确认本次沟通：' + late.reason);
+    };
+    const observer = new MutationObserver(() => {
+      if (!disposed && timer === null) timer = setTimeout(() => { check().catch(() => cleanup()); }, 100);
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'href', 'data-jobid', 'data-job-id'] });
+    expiry = setTimeout(cleanup, 60000);
+    state._pendingContactCleanup = cleanup;
   }
   async function performOfficialContact(button, expected, guard, reservation) {
     let context = null, activated = false, committed = false, clickError = '', cleanupError = '', resultPromise = null;
@@ -5921,17 +6049,23 @@
       cleanupError ? '撤销预留失败：' + cleanupError : ''].filter(Boolean).join('；') };
     // 激活一旦被调用，异常或没有回执都不能自动重发；保留占额以防重复联系。
     const result = await resultPromise;
+    result.context = context;
     if (result.status === 'unconfirmed' && clickError) {
       result.reason = '沟通事件派发中断，发送结果待确认；本次额度已保留，请在 BOSS 消息中核对';
     }
     if (cleanupError) addLog('沟通占额已保留，点击记录更新失败：' + cleanupError, 'err');
+    if (result.status === 'confirmed') {
+      try { result.dialogClosed = await dismissOfficialContactDialog(result, context); }
+      catch (error) { result.dialogClosed = false; result.closeError = String(error?.message || error); }
+      if (result.status === 'confirmed' && !result.dialogClosed) {
+        stop('投递已完成，但成功弹窗尚未关闭；关闭弹窗后再继续');
+        addLog('投递已完成，成功弹窗未关闭，已停止处理下一家', 'err');
+      }
+    }
     if (result.status === 'rejected') {
       state.stopFlag = true;
       state._lastRisk = 'BOSS 未确认本次沟通：' + result.reason;
       setStatus('alert');
-    }
-    if (result.status === 'confirmed' && result.stay && !state.stopFlag && !state.paused) {
-      await humanClick(result.stay, () => location.href === context.href && contactNoticeText(result.notice) === result.reason);
     }
     return result;
   }
@@ -5945,6 +6079,7 @@
     } else {
       if (card?.isConnected) tagCard(card, result.status === 'rejected' ? 'not-sent' : 'pending', result.status === 'rejected' ? result.reason : '已点击沟通，等待官方确认');
       addLog(`${result.status === 'rejected' ? '✗' : '⚠'} ${title} | ${result.status === 'rejected' ? '官方提示失败' : '已发起沟通，待确认'}：${result.reason}；为避免重复，本次占额保留`, result.status === 'rejected' ? 'err' : 'info');
+      if (result.status === 'unconfirmed') watchPendingContactResult(result, title, card);
     }
     refreshStats();
   }

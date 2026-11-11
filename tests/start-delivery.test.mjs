@@ -138,6 +138,82 @@ test('列表点开始已经达到120：不展开岗位、不请求 AI、不沟�
 });
 
 const SECOND = { ...JOB, id: 'nextJobFixture', data: 'job03', title: 'STM32 固件开发工程师' };
+
+test('两岗位连续投递：先异步关闭成功弹窗再展开下一家，两张卡片均为绿色完成', { timeout: 25000 }, async (t) => {
+  const events = [], violations = [], stayClicks = [], continueClicks = [];
+  const timers = [];
+  const f = await fixture(t, { jobs: [JOB, SECOND], stopAfter: 2,
+    onContact(win, { job }) {
+      events.push('contact:' + job.id);
+      if (win.document.querySelector('.greet-dialog')) violations.push('contact-before-close:' + job.id);
+      win.document.querySelector('.job-detail .op-btn-chat').textContent = '继续沟通';
+      const dialog = win.document.createElement('section'); dialog.className = 'greet-dialog';
+      dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header><p>本次默认招呼语</p>'
+        + '<footer><button class="default-btn cancel-btn">留在此页</button><button class="continue-btn">继续沟通</button></footer>';
+      dialog.querySelector('.continue-btn').addEventListener('click', () => continueClicks.push(job.id));
+      dialog.querySelector('.cancel-btn').addEventListener('click', () => {
+        stayClicks.push(job.id); events.push('stay:' + job.id);
+        timers.push(setTimeout(() => { dialog.remove(); events.push('closed:' + job.id); }, 120));
+      });
+      win.document.body.append(dialog);
+    },
+  });
+  t.after(() => timers.forEach(clearTimeout));
+  for (const card of f.win.document.querySelectorAll('.job-card-box')) card.addEventListener('click', () => {
+    events.push('expand:' + card.dataset.fixtureId);
+    if (f.win.document.querySelector('.greet-dialog')) violations.push('expand-before-close:' + card.dataset.fixtureId);
+  }, true);
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 22000);
+  assert.equal(f.clickCount(), 2, f.logs());
+  assert.deepEqual(violations, [], events.join('\n'));
+  assert.deepEqual(stayClicks, [JOB.id, SECOND.id], '每次成功后只能点同框留在此页');
+  assert.deepEqual(continueClicks, [], '不能进入聊天页打断下一家处理');
+  assert.equal(f.win.document.querySelector('.greet-dialog'), null, '最终成功弹窗也应清理');
+  assert.ok(events.indexOf('closed:' + JOB.id) < events.indexOf('expand:' + SECOND.id), events.join('\n'));
+  for (const card of f.win.document.querySelectorAll('.job-card-box')) {
+    const completed = card.querySelector('.bh-tag-pass');
+    assert.ok(completed, '已确认成功的岗位使用绿色完成状态');
+    assert.match(completed.textContent, /完成/);
+    assert.equal(card.querySelector('.bh-tag-pending'), null);
+  }
+  assert.equal(f.win.BH.loadStats().sent, 32);
+  assert.deepEqual(f.errors, []);
+});
+
+test('停止后成功回执迟到，原卡由待确认转为绿色完成并关闭弹窗，不重复点击', { timeout: 10000 }, async (t) => {
+  let timer, dialog, stayClicks = 0, sawPending = false, pendingAtReceipt = '';
+  const f = await fixture(t, {
+    onContact(win) {
+      timer = setTimeout(() => {
+        pendingAtReceipt = win.document.querySelector('.job-card-box .bh-tag-pending')?.textContent || '';
+        dialog = win.document.createElement('section'); dialog.className = 'greet-dialog';
+        dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header><p>迟到的官方成功回执</p>'
+          + '<footer><button class="default-btn cancel-btn">留在此页</button><button>继续沟通</button></footer>';
+        dialog.querySelector('.cancel-btn').addEventListener('click', () => { stayClicks++; dialog.remove(); });
+        win.document.body.append(dialog);
+      }, 600);
+    },
+  });
+  const card = f.win.document.querySelector('.job-card-box');
+  const observer = new f.win.MutationObserver(() => { if (card.querySelector('.bh-tag-pending')) sawPending = true; });
+  observer.observe(card, { childList: true, subtree: true });
+  t.after(() => { clearTimeout(timer); observer.disconnect(); });
+  f.start();
+  await waitUntil(() => card.querySelector('.bh-tag-pass') && dialog && !dialog.isConnected && f.stopped(), 9000);
+  assert.equal(sawPending, true, '回执必须在原投递已返回待确认后才到达');
+  assert.match(pendingAtReceipt, /待确认/);
+  assert.match(card.querySelector('.bh-tag-pass')?.textContent || '', /完成/);
+  assert.equal(card.querySelector('.bh-tag-pending'), null);
+  assert.equal(stayClicks, 1);
+  assert.ok(dialog && !dialog.isConnected);
+  assert.equal(f.win.BH.state.stopFlag, true, '只补记完成与关闭弹窗，不能恢复投递循环');
+  assert.equal(f.expandCount(), 1);
+  assert.equal(f.clickCount(), 1);
+  assert.equal(f.win.BH.loadStats().sent, 31);
+  assert.deepEqual(f.errors, []);
+});
+
 for (const saveVia of ['主面板', 'AI 设置']) {
   test(`运行中通过${saveVia}保存每日上限80→150，立即同步面板并允许第81次沟通`, { timeout: 35000 }, async (t) => {
     let observed;

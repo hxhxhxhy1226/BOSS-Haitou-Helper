@@ -51,14 +51,24 @@ const detail = `<section class="job-detail" data-jobid="fixture01"><header class
   <section class="job-detail-section"><h2>职位描述</h2><div class="job-sec-text">负责 STM32 产品固件研发、FreeRTOS 驱动调试、接口协议实现以及产品功能维护，参与设备通信软件开发。</div></section>
   <div class="boss-info"><span class="active-time">今日活跃</span></div></section>`;
 const fixture = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>独立扩展本地验收</title>
-  <style>body{font:16px/1.6 sans-serif;background:#eef3f8;padding:24px;color:#223} .job-list-wrapper{width:330px;padding:20px;background:#fff} main{margin-left:380px;max-width:420px} .op-btn-chat{display:inline-block;padding:12px;background:#00bca4;color:white} .job-sec-text{padding:16px 0} a{cursor:pointer}</style>
+  <style>body{font:16px/1.6 sans-serif;background:#eef3f8;padding:24px;color:#223} .job-list-wrapper{width:330px;padding:20px;background:#fff} main{margin-left:380px;max-width:420px} .op-btn-chat{display:inline-block;padding:12px;background:#00bca4;color:white} .job-sec-text{padding:16px 0} a{cursor:pointer} .contact-completed-overlay{position:fixed;inset:0;z-index:2000;background:#0006;display:flex;align-items:center;justify-content:center}.contact-completed-box{width:500px;background:white;padding:28px;border-radius:16px}.contact-completed-preview{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#f5f5f5;padding:10px}.contact-completed-footer{display:flex;gap:12px;justify-content:flex-end;margin-top:24px}.contact-completed-footer button{padding:10px 16px}</style>
   <h1>Edge 独立扩展验收 · 本地模拟职位</h1><p>无油猴、无真实账号；网站请求全部由本地测试接管。</p>
   <ul class="job-list-wrapper"><li class="job-card-box" data-jobid="fixture01"><a class="job-name" href="/job_detail/extensionFixture.html">嵌入式软件工程师</a><span class="job-salary">20-30K</span><ul class="tag-list"><li>本科</li><li>3-5年</li></ul><a class="company-name" href="/gongsi/fixture.html">本地测试公司</a><div class="job-card-footer"><span class="time">刚刚活跃</span></div></li></ul>
   <main id="detail-host">${detail}</main><script>
   window.fixtureClicks=0; window.fixtureReplacements=0; window.fixtureClickedGeneration=0;
+  window.fixtureStayClicks=0; window.fixtureContinueClicks=0; window.fixtureDialogClosed=false;
   let fixtureReplaceTimer=null, fixtureReplaceDeadline=null;
   function stopRebuilding(){clearInterval(fixtureReplaceTimer);clearTimeout(fixtureReplaceDeadline);fixtureReplaceTimer=null;fixtureReplaceDeadline=null;}
-  function bindContact(){document.querySelector('.op-btn-chat').addEventListener('click',function(e){e.preventDefault();fixtureClicks++;fixtureClickedGeneration=Number(this.dataset.fixtureGeneration||0);stopRebuilding();this.textContent='继续沟通';const box=document.createElement('div');box.className='boss-dialog';box.setAttribute('role','dialog');box.textContent='已向BOSS发送消息';document.body.append(box);});}
+  function bindContact(){document.querySelector('.op-btn-chat').addEventListener('click',function(e){
+    e.preventDefault();fixtureClicks++;fixtureClickedGeneration=Number(this.dataset.fixtureGeneration||0);stopRebuilding();this.textContent='继续沟通';
+    const detailHost=document.querySelector('#detail-host');detailHost.setAttribute('aria-hidden','true');
+    const overlay=document.createElement('div');overlay.className='contact-completed-overlay';
+    overlay.innerHTML='<section class="contact-completed-box"><h3><span>已向</span> <span>BOSS</span> <span>发送</span> <span>消息</span></h3><div class="contact-completed-preview"></div><p>如需修改打招呼内容，请在消息通知页面修改</p><footer class="contact-completed-footer"><button data-fixture-stay>留在此页</button><button data-fixture-continue>继续沟通</button></footer></section>';
+    overlay.querySelector('.contact-completed-preview').textContent='本地模拟的招呼内容与项目经验，仅用于检查长消息预览。'.repeat(100);
+    overlay.querySelector('[data-fixture-stay]').addEventListener('click',function(){fixtureStayClicks++;setTimeout(function(){overlay.remove();detailHost.removeAttribute('aria-hidden');fixtureDialogClosed=true;},120);});
+    overlay.querySelector('[data-fixture-continue]').addEventListener('click',function(){fixtureContinueClicks++;});
+    document.body.append(overlay);
+  });}
   function startRebuilding(){stopRebuilding();fixtureReplaceTimer=setInterval(function(){const old=document.querySelector('.op-btn-chat');if(!old||fixtureClicks){stopRebuilding();return;}const current=old.cloneNode(true);current.dataset.fixtureGeneration=String(++fixtureReplacements);old.replaceWith(current);bindContact();},80);fixtureReplaceDeadline=setTimeout(stopRebuilding,6000);}
   bindContact(); document.querySelector('.job-card-box').addEventListener('click',function(e){e.preventDefault();document.querySelector('#detail-host').innerHTML=${JSON.stringify(detail)};bindContact();startRebuilding();});
   </script></html>`;
@@ -122,6 +132,8 @@ try {
   await until(() => evaluate(page, 'fixtureClicks===1'), 20000);
   await until(() => evaluate(page, "document.querySelector('.bh-log').textContent.includes('官方已确认')"));
   check(await evaluate(page, 'fixtureClicks===1 && fixtureReplacements>1 && fixtureClickedGeneration===fixtureReplacements && fixtureReplaceTimer===null'), '同岗位按钮持续重建后只激活最新按钮一次，并获得官方确认');
+  check(await evaluate(page, "(()=>{const tag=document.querySelector('.job-card-box .bh-tag-pass');return !!tag&&tag.textContent.includes('完成')&&getComputedStyle(tag).backgroundColor.includes('52, 199, 89')&&!document.querySelector('.job-card-box .bh-tag-pending');})()"), '拆分成功标题和长预览在背景详情隐藏时仍被识别，卡片显示绿色完成');
+  check(await evaluate(page, "fixtureDialogClosed && fixtureStayClicks===1 && fixtureContinueClicks===0 && !document.querySelector('.contact-completed-overlay') && !document.querySelector('#detail-host').hasAttribute('aria-hidden')"), '只点击留在此页并等待成功框异步关闭，不进入继续沟通');
   await until(() => evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).some(x=>x?.kind==='sent'&&x.status==='dispatched'&&x.clickPending===false&&x.clickedAt>0))"));
   const sent = await evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).filter(x=>x?.kind==='sent'&&x.status==='dispatched').length)");
   check(sent === 1, '模拟岗位经筛选后仅点击一次，后台已持久化额度，官方回执识别成功');

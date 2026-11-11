@@ -8,6 +8,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 const require = createRequire(import.meta.url);
 const { createBossNativeBackground } = require('../extension/background.js');
 const sources = ['platform.js', 'helper.js', 'content.js'].map((name) => fs.readFileSync(new URL('../extension/' + name, import.meta.url), 'utf8'));
+const extensionVersion = JSON.parse(fs.readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8')).version;
 const CONFIG = 'boss_helper_config_v1';
 const STATS = 'boss_helper_stats_v1';
 const ID = 'native-integration-fixture';
@@ -37,7 +38,7 @@ function deferred() { let resolve; const promise = new Promise((done) => { resol
 function environment(t, options = {}) {
   const data = { [CONFIG]: clone({ ...BASE_CONFIG, ...options.config }) };
   const storageListeners = new Set(), requests = [], messages = [], pages = [];
-  let number = 0, hydrateGate = null, configGate = null, deliveryGate = null, diagnosticGate = null, networkGate = null;
+  let number = 0, hydrateGate = null, configGate = null, deliveryGate = null, clickMarkGate = null, diagnosticGate = null, networkGate = null;
   let failConfig = false, configAttempts = 0, deliveryAttempts = 0, diagnosticAttempts = 0;
   const api = {
     runtime: { id: ID, getURL: (resource) => `chrome-extension://${ID}/${resource}` },
@@ -59,6 +60,7 @@ function environment(t, options = {}) {
           if (Object.values(values).some((value) => value?.kind === 'sent' && value?.status === 'dispatched')) {
             deliveryAttempts++;
             if (deliveryGate) await deliveryGate;
+            if (clickMarkGate && Object.values(values).some((value) => value?.clickPending === false)) await clickMarkGate;
           }
           if (Object.hasOwn(values, STATS)) {
             diagnosticAttempts++;
@@ -101,7 +103,7 @@ function environment(t, options = {}) {
     win.Response = Response;
     win.AbortController = AbortController;
     win.chrome = { ...api, runtime: { ...api.runtime,
-      getManifest: () => ({ version: '1.1.0' }),
+      getManifest: () => ({ version: extensionVersion }),
       onMessage: { addListener: (listener) => listeners.push(listener) },
       sendMessage(message) {
         messages.push({ tabId, action: message.action });
@@ -139,6 +141,7 @@ function environment(t, options = {}) {
     get diagnosticAttempts() { return diagnosticAttempts; },
     set hydrateGate(value) { hydrateGate = value; }, set configGate(value) { configGate = value; }, set failConfig(value) { failConfig = value; },
     set deliveryGate(value) { deliveryGate = value; },
+    set clickMarkGate(value) { clickMarkGate = value; },
     set diagnosticGate(value) { diagnosticGate = value; }, set networkGate(value) { networkGate = value; },
   };
 }
@@ -293,6 +296,80 @@ test('explicit native detail start waits for durable quota commit before dispatc
   assert.equal(page.win.BH.loadStats().sent, 1);
   assert.equal(f.requests.length, 0);
   assert.equal(page.win.localStorage.length, 0);
+});
+
+for (const change of ['stop', 'replace-button', 'change-job']) {
+  test(`native AI delivery handles ${change} while quota persistence is pending`, { timeout: 20000 }, async (t) => {
+    const f = environment(t, { config: { aiEnabled: true } });
+    const page = f.page({ url: 'https://www.zhipin.com/job_detail/nativeFixture.html' });
+    await page.ready;
+    const gate = deferred(); f.deliveryGate = gate.promise;
+    page.action('toggle');
+    await until(() => f.deliveryAttempts === 1, 12000);
+    assert.match(page.logs(), /AI 通过/);
+    assert.equal(page.clicks(), 0);
+    assert.equal(f.worker.stats(f.data).sent, 0);
+    let replacementClicks = 0;
+    if (change === 'stop') page.win.BH.stop('fixture stop before activation');
+    if (change === 'change-job') page.doc.querySelector('.job-sec-text').textContent = '此职位已更新为销售岗位，与刚才的研发职位不同。';
+    if (change === 'replace-button') {
+      const original = page.doc.querySelector('.op-btn-chat');
+      const replacement = original.cloneNode(true);
+      replacement.addEventListener('click', (event) => {
+        event.preventDefault(); replacementClicks++;
+        assert.equal(f.worker.stats(f.data).sent, 1, 'Quota must be durable before the latest button is activated');
+        page.doc.body.insertAdjacentHTML('beforeend', '<div class="boss-dialog">已向BOSS发送消息</div>');
+        page.win.BH.stop('fixture activated latest button');
+      });
+      original.replaceWith(replacement);
+    }
+    gate.resolve(); f.deliveryGate = null;
+    await until(() => page.win.BH.state._loopActive === false);
+    const records = Object.values(f.data).filter((event) => event?.kind === 'sent');
+    assert.equal(records.length, 1);
+    assert.equal(page.clicks(), 0, 'A detached old button must never receive the click');
+    assert.equal(f.requests.length, 1, 'Recovering an equivalent button must reuse the completed AI decision');
+    if (change === 'replace-button') {
+      assert.equal(replacementClicks, 1);
+      assert.equal(f.worker.stats(f.data).sent, 1);
+      assert.equal(records[0].clickPending, false);
+      assert.ok(records[0].clickedAt);
+      assert.match(page.logs(), /官方已确认沟通/);
+      assert.equal(await page.win.BH.reserveDelivery('nativeFixture', 2), false);
+    } else {
+      assert.equal(replacementClicks, 0);
+      assert.equal(f.worker.stats(f.data).sent, 0);
+      assert.equal(f.worker.stats(f.data).pending, 0);
+      assert.equal(records[0].status, 'cancelled');
+      assert.doesNotMatch(page.logs(), /已发起沟通，待确认/);
+      const retry = await page.win.BH.reserveDelivery('nativeFixture', 2);
+      assert.ok(retry, 'An activation that never happened must not permanently block this job');
+      await page.win.BH.releaseDelivery(retry);
+    }
+    assert.equal(page.win.localStorage.length, 0);
+    assert.deepEqual(page.errors, []);
+  });
+}
+
+test('a brief official success notice is captured while marking the click is blocked on storage', { timeout: 12000 }, async (t) => {
+  const f = environment(t), page = f.page({ url: 'https://www.zhipin.com/job_detail/nativeFixture.html' });
+  await page.ready;
+  const gate = deferred(); f.clickMarkGate = gate.promise;
+  let notice;
+  page.doc.querySelector('.op-btn-chat').addEventListener('click', () => {
+    notice = page.doc.createElement('div'); notice.className = 'toast'; notice.textContent = '招呼已发送';
+    page.doc.body.append(notice);
+  });
+  page.action('toggle');
+  await until(() => f.deliveryAttempts === 2, 7000);
+  assert.equal(page.clicks(), 1);
+  assert.equal(f.worker.stats(f.data).sent, 1);
+  notice.remove();
+  gate.resolve(); f.clickMarkGate = null;
+  await until(() => page.win.BH.state._loopActive === false);
+  assert.match(page.logs(), /官方已确认沟通/);
+  assert.doesNotMatch(page.logs(), /已发起沟通，待确认/);
+  assert.equal(page.clicks(), 1);
 });
 
 test('stopping cancels an AI connection test already queued behind another test before it can send a second request', async (t) => {

@@ -110,6 +110,13 @@ for (const scenario of [
     assert.equal(f.countAtClick(), 31, f.logs());
     assert.equal(f.win.BH.loadStats().sent, 31);
     assert.equal(f.errors.length, 0, f.errors.join('\n'));
+    if (scenario.aiEnabled && !scenario.primaryFails) {
+      await waitUntil(() => f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1');
+      const card = f.win.document.querySelector('.job-card-box');
+      assert.match(card.querySelector('.bh-tag')?.textContent || '', /待确认/);
+      assert.equal(card.querySelector('.bh-tag-skip'), null, '已经激活但尚无官方回执不能显示为跳过');
+      assert.equal(card.querySelector('.bh-tag-ai-pass'), null, '投递阶段应替换临时 AI 通过标签');
+    }
     if (scenario.primaryFails) assert.deepEqual(f.requests.map((r) => r.model), ['fixture-primary', 'fixture-backup']);
   });
 }
@@ -211,6 +218,47 @@ test('等待 AI 判定时150→80，返回的通过结论不能再投第81次', 
   assert.equal(f.win.BH.state.config.dailyLimit, 80, f.logs());
   assert.equal(f.clickCount(), 0, f.logs());
   assert.equal(f.win.BH.loadStats().sent, 80);
+});
+
+test('AI 通过后同岗位已被另一标签预留，显示未投递原因而非残留 AI 通过', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true });
+  const occupied = await f.win.BH.reserveDelivery(JOB.id, 120);
+  assert.ok(occupied);
+  f.win.document.querySelector('[data-cfg="maxRounds"]').value = '1';
+  f.start();
+  await waitUntil(() => f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1' || f.stopped(), 14000);
+  const card = f.win.document.querySelector('.job-card-box');
+  assert.equal(f.requests.length, 1, f.logs());
+  assert.equal(f.clickCount(), 0, f.logs());
+  assert.equal(f.win.BH.loadStats().sent, 30);
+  assert.equal(card.querySelector('.bh-tag-ai-pass'), null, f.logs());
+  assert.match(card.querySelector('.bh-tag')?.textContent || '', /未投递/);
+  assert.match(card.querySelector('.bh-tag-reason')?.textContent || '', /标签|预留|占用|发起|已投|额度/);
+  await f.win.BH.releaseDelivery(occupied);
+});
+
+test('AI 通过后岗位正文更新，零投递并显示未投递，不重复请求 AI', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true });
+  let changed = false;
+  const observer = new f.win.MutationObserver(() => {
+    if (changed || !f.win.document.querySelector('.bh-tag-ai-pass')) return;
+    changed = true;
+    f.win.document.querySelector('.job-sec-text').textContent = '新的岗位职责已变更为销售支持与客户沟通，与先前研发职责不同，需要重新判断。';
+  });
+  observer.observe(f.win.document.querySelector('.job-list-wrapper'), { childList: true, subtree: true });
+  t.after(() => observer.disconnect());
+  f.win.document.querySelector('[data-cfg="maxRounds"]').value = '1';
+  f.start();
+  await waitUntil(() => f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1' || f.stopped(), 14000);
+  const card = f.win.document.querySelector('.job-card-box');
+  assert.equal(changed, true, f.logs());
+  assert.equal(f.requests.length, 1, f.logs());
+  assert.equal(f.clickCount(), 0, f.logs());
+  assert.equal(f.win.BH.loadStats().sent, 30);
+  assert.equal(f.win.BH.loadStats().pending, 0);
+  assert.equal(card.querySelector('.bh-tag-ai-pass'), null, f.logs());
+  assert.match(card.querySelector('.bh-tag')?.textContent || '', /未投递/);
+  assert.match(card.querySelector('.bh-tag-reason')?.textContent || '', /改变|变化|更新|正文|岗位|内容/);
 });
 
 test('已到80限额自然停止后保存150，不刷新即同步剩余70并再次开始投第81次', { timeout: 22000 }, async (t) => {

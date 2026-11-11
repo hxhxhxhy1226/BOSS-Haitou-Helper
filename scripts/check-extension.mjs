@@ -35,6 +35,9 @@ if (fs.existsSync(legacySource)) {
 }
 const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 if (pkg.version !== manifest.version) failures.push('Package and extension versions differ');
+const lock = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package-lock.json'), 'utf8'));
+if (lock.version !== manifest.version || lock.packages?.['']?.version !== manifest.version) failures.push('Lockfile and extension versions differ');
+if (!files.get('helper.js')?.toString('utf8').startsWith(`/* BOSS 直聘海投助手 ${manifest.version} —`)) failures.push('Core banner and extension versions differ');
 if (failures.length) {
   for (const failure of failures) console.error(failure);
   process.exitCode = 1;

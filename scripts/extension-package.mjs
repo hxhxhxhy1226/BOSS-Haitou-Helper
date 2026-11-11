@@ -80,6 +80,8 @@ export function sourcePackageFiles(root, extensionFiles) {
     files.set(name, fs.readFileSync(path.join(root, name)));
   }
   if (fs.existsSync(path.join(root, 'VALIDATION.md'))) files.set('VALIDATION.md', fs.readFileSync(path.join(root, 'VALIDATION.md')));
+  if (fs.existsSync(path.join(root, 'AGENTS.md'))) files.set('AGENTS.md', fs.readFileSync(path.join(root, 'AGENTS.md')));
+  if (fs.existsSync(path.join(root, 'CHANGELOG.md'))) files.set('CHANGELOG.md', fs.readFileSync(path.join(root, 'CHANGELOG.md')));
   // Keep the selected icon's editable design in the source archive, outside the runtime package.
   for (const name of ['render.html', 'export.py', 'README.md', 'icon512.png']) {
     const relative = 'design/briefcase/' + name;

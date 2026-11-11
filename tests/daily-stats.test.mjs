@@ -285,6 +285,7 @@ test('真实详情流程：119→120 在最后一次点击前持久化，重新�
   a.win.document.querySelector('.op-btn-chat').addEventListener('click', (e) => {
     e.preventDefault(); clicks++;
     assert.equal(a.BH.loadStats().sent, 120, '额度在事件交给站点前已持久化');
+    a.BH.stop('fixture observed final daily slot');
   });
   assert.equal(await a.BH.autoChatOnDetail(), true);
   assert.equal(clicks, 1);

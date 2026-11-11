@@ -67,6 +67,17 @@ test('本次新出现的可见官方成功弹窗可以确认，并只定位该�
   assert.equal(result.stay, stay);
 });
 
+test('官方回执延迟超过四秒才出现，默认等待仍确认招呼已发送', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), before = f.context();
+  const started = Date.now();
+  const timer = setTimeout(() => f.addNotice('招呼已发送'), 4300);
+  t.after(() => clearTimeout(timer));
+  const result = await f.BH.waitForOfficialContactResult(before);
+  assert.equal(result.status, 'confirmed');
+  assert.match(result.reason, /招呼已发送/);
+  assert.ok(Date.now() - started >= 4000, '覆盖旧四秒等待窗口以外的真实延迟回执');
+});
+
 test('旧弹窗、隐藏成功提示、助手日志和 JD 正文都不能证明发送成功', async (t) => {
   const f = await fixture(t);
   f.addNotice('已向BOSS发送消息');
@@ -153,20 +164,83 @@ test('官方明确拒绝或频繁提示会停止，并保留已发起额度避�
   assert.equal(await f.BH.reserveDelivery(JOB.jobId, 10), false);
 });
 
-test('鼠标事件抛错后不会释放已提交额度，也不会谎称未点击或成功', { timeout: 6000 }, async (t) => {
+test('调用官方 click 时抛错仍保留占额，不谎称成功也不重复激活', { timeout: 6000 }, async (t) => {
   const f = await fixture(t);
   const slot = await f.BH.reserveDelivery(JOB.jobId, 10);
-  const original = f.button.dispatchEvent.bind(f.button);
-  f.button.dispatchEvent = (event) => {
-    if (event.type === 'mousedown') { f.BH.state.stopFlag = true; throw new Error('fixture event dispatch failed'); }
-    return original(event);
+  let attempts = 0;
+  f.button.addEventListener('click', () => { f.BH.state.stopFlag = true; });
+  f.button.click = () => {
+    attempts++;
+    f.BH.state.stopFlag = true;
+    throw new Error('fixture activation interrupted');
   };
   const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(attempts, 1);
   assert.equal(result.status, 'unconfirmed');
   assert.match(result.reason, /派发中断/);
   assert.equal(f.BH.loadStats().sent, 1);
   assert.equal(f.BH.loadStats().pending, 0);
   assert.equal(await f.BH.reserveDelivery(JOB.jobId, 10), false);
+});
+
+test('准备滚动期间同岗位按钮重建，重新定位后只激活最新按钮一次', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t);
+  const slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let originalClicks = 0, replacementClicks = 0, replaced = false;
+  f.button.addEventListener('click', () => { originalClicks++; });
+  f.button.scrollIntoView = () => {
+    if (replaced) return;
+    replaced = true;
+    const replacement = f.button.cloneNode(true);
+    replacement.addEventListener('click', (event) => {
+      event.preventDefault(); replacementClicks++;
+      f.addNotice('已向BOSS发送消息');
+    });
+    f.button.replaceWith(replacement);
+  };
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(replaced, true);
+  assert.equal(originalClicks, 0);
+  assert.equal(replacementClicks, 1);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(f.BH.loadStats().sent, 1);
+  assert.equal(f.BH.loadStats().pending, 0);
+  assert.equal(await f.BH.reserveDelivery(JOB.jobId, 10), false);
+});
+
+test('网站 mousedown 重建逻辑不再造成零 click 却永久占额', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t);
+  const slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let clicks = 0;
+  const activate = (event) => { event.preventDefault(); clicks++; f.addNotice('已向BOSS发送消息'); };
+  f.button.addEventListener('click', activate);
+  f.button.addEventListener('mousedown', () => {
+    const replacement = f.button.cloneNode(true);
+    replacement.addEventListener('click', activate);
+    f.button.replaceWith(replacement);
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(clicks, 1);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(f.BH.loadStats().sent, 1);
+  assert.equal(f.BH.loadStats().pending, 0);
+});
+
+test('准备点击过程中停止，零激活且释放占额，恢复后仍可处理同岗位', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t);
+  const slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let clicks = 0;
+  f.button.addEventListener('click', () => { clicks++; });
+  f.button.scrollIntoView = () => { f.BH.state.stopFlag = true; };
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'not-started');
+  assert.equal(clicks, 0);
+  assert.equal(f.BH.loadStats().sent, 0);
+  assert.equal(f.BH.loadStats().pending, 0);
+  f.BH.state.stopFlag = false;
+  const retry = await f.BH.reserveDelivery(JOB.jobId, 10);
+  assert.ok(retry, '未实际调用 click 的取消操作不能永久屏蔽该岗位');
+  await f.BH.releaseDelivery(retry);
 });
 
 test('点击前停止则释放预留，不占发起次数', async (t) => {

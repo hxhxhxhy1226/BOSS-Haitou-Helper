@@ -165,6 +165,205 @@ test('备用 API 获取模型和选择模型只更新对应卡片', async (t) =>
   assert.equal(f.doc.querySelector('[data-cfg="aiModel"]').value, 'primary-model');
 });
 
+test('保存后连续拉取主 API 模型不弹未保存提示，也不重复保存配置', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary, aiEndpoints: [backup()] });
+  let configWrites = 0;
+  const setValue = f.win.GM_setValue;
+  f.win.GM_setValue = (key, value) => {
+    if (key === CONFIG_KEY) configWrites++;
+    return setValue(key, value);
+  };
+  f.open();
+  await f.action('aisave');
+  const saved = structuredClone(f.values.get(CONFIG_KEY));
+  assert.equal(configWrites, 1);
+  for (let i = 0; i < 2; i++) {
+    await f.action('aimodels');
+    assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+    await until(() => f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]'));
+    assert.equal(f.requests.length, i + 1);
+    assert.equal(f.requests[i].url, 'https://primary.example/v1/models');
+    f.doc.querySelector('#bh-model-picker [data-act="close"]').click();
+  }
+  assert.equal(configWrites, 1);
+  assert.deepEqual(f.values.get(CONFIG_KEY), saved);
+  await f.action('aiclose');
+  assert.equal(f.modal(), null);
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+});
+
+test('主 API 直接用未保存输入拉取，仅选择模型后保存且重开无误报', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary, aiUserPortrait: '原画像' });
+  f.open();
+  f.doc.querySelector('[data-cfg="aiBaseUrl"]').value = ' https://draft.example/v1 ';
+  f.doc.querySelector('[data-cfg="aiApiKey"]').value = ' draft-key ';
+  f.doc.querySelector('[data-cfg="aiUserPortrait"]').value = '新画像：固件研发';
+  const saved = structuredClone(f.values.get(CONFIG_KEY));
+  await f.action('aimodels');
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  await until(() => f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]'));
+  assert.equal(f.requests[0].url, 'https://draft.example/v1/models');
+  assert.equal(f.requests[0].headers.Authorization, 'Bearer draft-key');
+  assert.deepEqual(f.values.get(CONFIG_KEY), saved, '拉取列表不能顺带保存草稿');
+  f.doc.querySelector('#bh-model-picker [data-act="close"]').click();
+  await f.action('aimodels');
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  await until(() => f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]'));
+  f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]').click();
+  await until(() => !f.doc.getElementById('bh-model-picker'));
+  assert.equal(f.values.get(CONFIG_KEY).aiBaseUrl, 'https://draft.example/v1/chat/completions');
+  assert.equal(f.values.get(CONFIG_KEY).aiApiKey, 'draft-key');
+  assert.equal(f.values.get(CONFIG_KEY).aiUserPortrait, '新画像：固件研发');
+  assert.equal(f.values.get(CONFIG_KEY).aiModel, 'backup-discovered');
+  await f.action('aiclose');
+  assert.equal(f.modal(), null);
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  f.open();
+  assert.equal(f.doc.querySelector('[data-cfg="aiModel"]').value, 'backup-discovered');
+  await f.action('aiclose');
+  assert.equal(f.modal(), null);
+});
+
+test('存储重排备用 API 对象属性后，保存再关闭不误报未保存', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary, aiEndpoints: [backup()] });
+  const getValue = f.win.GM_getValue;
+  f.win.GM_getValue = (key, fallback) => {
+    const value = getValue(key, fallback);
+    if (key === CONFIG_KEY && Array.isArray(value?.aiEndpoints)) {
+      value.aiEndpoints = value.aiEndpoints.map((endpoint) =>
+        Object.fromEntries(Object.keys(endpoint).sort().map((name) => [name, endpoint[name]])));
+    }
+    return value;
+  };
+  f.open();
+  await f.action('aisave');
+  await f.action('aiclose');
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  assert.equal(f.modal(), null);
+});
+
+test('主备 API 拉取列表时不自动改写空模型名或保存配置', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary, aiModel: 'gpt-4o-mini',
+    aiEndpoints: [backup('backup-1', { enabled: false, model: '' })],
+  });
+  f.open();
+  f.doc.querySelector('[data-cfg="aiModel"]').value = '';
+  const saved = structuredClone(f.values.get(CONFIG_KEY));
+  await f.action('aimodels');
+  await until(() => f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]'));
+  assert.equal(f.doc.querySelector('[data-cfg="aiModel"]').value, '');
+  assert.deepEqual(f.values.get(CONFIG_KEY), saved);
+  f.doc.querySelector('#bh-model-picker [data-act="close"]').click();
+  await f.action('aiendpointmodels', f.cards()[0]);
+  await until(() => f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]'));
+  assert.equal(f.field(f.cards()[0], 'model').value, '');
+  assert.equal(f.doc.querySelector('[data-cfg="aiModel"]').value, '');
+  assert.deepEqual(f.values.get(CONFIG_KEY), saved);
+});
+
+test('已存接口简写和首尾空白与表单标准化值等价，不误报未保存', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary,
+    aiBaseUrl: ' https://primary.example/v1 ', aiApiKey: ' primary-secret ',
+    aiUserPortrait: ' 固件研发 ',
+    aiEndpoints: [backup('backup-1', { baseUrl: ' https://backup.example/v1 ', apiKey: ' backup-secret ' })],
+  });
+  f.open();
+  await f.action('aiclose');
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  assert.equal(f.modal(), null);
+});
+
+test('清空已保存的默认接口地址后关闭仍提示未保存', async (t) => {
+  const defaultUrl = 'https://api.openai.com/v1/chat/completions';
+  const f = await fixture(t, new Map(), { ...primary, aiBaseUrl: defaultUrl });
+  f.open();
+  await f.action('aisave');
+  f.doc.querySelector('[data-cfg="aiBaseUrl"]').value = '';
+  await f.action('aiclose');
+  assert.ok(f.doc.getElementById('bh-ai-confirm'));
+  assert.ok(f.modal());
+  assert.equal(f.values.get(CONFIG_KEY).aiBaseUrl, defaultUrl);
+  f.doc.querySelector('#bh-ai-confirm [data-act="neutral"]').click();
+  f.open();
+  assert.equal(f.doc.querySelector('[data-cfg="aiBaseUrl"]').value, defaultUrl);
+});
+
+test('已保存空接口地址打开关闭不误报，拉取提示缺地址且不发送请求', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary, aiBaseUrl: '' });
+  f.open();
+  assert.equal(f.doc.querySelector('[data-cfg="aiBaseUrl"]').value, '');
+  await f.action('aiclose');
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  assert.equal(f.modal(), null);
+  f.open();
+  await f.action('aimodels');
+  assert.equal(f.doc.getElementById('bh-ai-confirm'), null);
+  await until(() => f.doc.querySelector('#bh-detail-modal [data-role="body"]'));
+  assert.match(f.doc.querySelector('#bh-detail-modal [data-role="body"]').value, /接口地址为空/);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.values.get(CONFIG_KEY).aiBaseUrl, '');
+  assert.equal(f.doc.getElementById('bh-model-picker'), null);
+  f.doc.querySelector('#bh-detail-modal [data-act="close"]').click();
+  await f.action('aiclose');
+  assert.equal(f.modal(), null);
+});
+
+test('修改主 API Key 或备用 API 顺序后关闭仍提示真正未保存的改动', async (t) => {
+  const f = await fixture(t, new Map(), { ...primary, aiEndpoints: [backup('a'), backup('b')] });
+  f.open();
+  await f.action('aisave');
+  f.doc.querySelector('[data-cfg="aiApiKey"]').value = 'changed-primary-key';
+  await f.action('aiclose');
+  assert.ok(f.doc.getElementById('bh-ai-confirm'));
+  f.doc.querySelector('#bh-ai-confirm [data-act="cancel"]').click();
+  assert.ok(f.modal());
+  f.doc.querySelector('[data-cfg="aiApiKey"]').value = primary.aiApiKey;
+  await f.action('aiendpointup', f.cards()[1]);
+  await f.action('aiclose');
+  assert.ok(f.doc.getElementById('bh-ai-confirm'));
+  f.doc.querySelector('#bh-ai-confirm [data-act="neutral"]').click();
+  assert.equal(f.modal(), null);
+  f.open();
+  assert.deepEqual(f.cards().map((card) => card.dataset.endpointId), ['a', 'b']);
+  assert.equal(f.doc.querySelector('[data-cfg="aiApiKey"]').value, primary.aiApiKey);
+});
+
+test('选择模型保存失败不显示已保存，保留选择窗口并允许重试', async (t) => {
+  const f = await fixture(t, new Map(), primary);
+  f.open();
+  await f.action('aisave');
+  await f.action('aimodels');
+  await until(() => f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]'));
+  const saved = structuredClone(f.values.get(CONFIG_KEY));
+  const setValue = f.win.GM_setValue;
+  const setItem = f.win.Storage.prototype.setItem;
+  f.win.GM_setValue = (key, value) => {
+    if (key === CONFIG_KEY) throw Error('fixture config write failure');
+    return setValue(key, value);
+  };
+  f.win.Storage.prototype.setItem = function (key, value) {
+    if (key === CONFIG_KEY) throw Error('fixture fallback write failure');
+    return setItem.call(this, key, value);
+  };
+  f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]').click();
+  await until(() => /模型已填入，但保存失败/.test(f.doc.querySelector('.bh-log').textContent));
+  assert.ok(f.doc.getElementById('bh-model-picker'));
+  const saveError = f.doc.querySelector('#bh-model-picker [role="alert"]');
+  assert.ok(saveError, '保存失败原因需要在模型选择窗口内可见');
+  assert.match(saveError.textContent, /保存失败/);
+  assert.deepEqual(f.values.get(CONFIG_KEY), saved);
+  assert.equal(f.win.BH.state.config.aiModel, primary.aiModel);
+  assert.doesNotMatch(f.doc.querySelector('.bh-log').textContent, /已选择模型：backup-discovered（已保存）/);
+  f.win.GM_setValue = setValue;
+  f.win.Storage.prototype.setItem = setItem;
+  f.doc.querySelector('#bh-model-picker [data-model="backup-discovered"]').click();
+  await until(() => !f.doc.getElementById('bh-model-picker'));
+  assert.equal(f.values.get(CONFIG_KEY).aiModel, 'backup-discovered');
+  assert.match(f.doc.querySelector('.bh-log').textContent, /已选择模型：backup-discovered（已保存）/);
+  await f.action('aiclose');
+  assert.equal(f.modal(), null);
+});
+
 test('备用 API 名称作为文本显示，不能注入页面元素', async (t) => {
   const f = await fixture(t, new Map(), { ...primary, aiEndpoints: [backup('backup-1', { name: '<img src=x onerror=alert(1)>' })] });
   f.open();

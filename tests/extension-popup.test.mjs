@@ -8,6 +8,7 @@ const extension = new URL('../extension/', import.meta.url);
 const html = fs.readFileSync(new URL('popup.html', extension), 'utf8');
 const code = fs.readFileSync(new URL('popup.js', extension), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', extension), 'utf8'));
+const packageVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const CONFIG = 'boss_helper_config_v1';
 
 async function until(predicate, timeoutMs = 1500) {
@@ -23,7 +24,7 @@ async function fixture(t, options = {}) {
   const listeners = { storage: [], added: [], removed: [] };
   const values = { [CONFIG]: options.config || {} };
   const granted = new Set(options.granted || []);
-  const status = { ok: true, running: true, paused: false, visible: true, version: '1.1.0', ...options.status };
+  const status = { ok: true, running: true, paused: false, visible: true, version: manifest.version, ...options.status };
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', (error) => errors.push(error.message));
   const dom = new JSDOM(html, {
@@ -85,7 +86,7 @@ async function fixture(t, options = {}) {
 
 test('Edge 扩展清单仅常驻 BOSS 权限，MV3 入口与本地图标完整', () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, '1.1.0');
+  assert.equal(manifest.version, packageVersion);
   assert.deepEqual(manifest.permissions, ['storage']);
   assert.deepEqual(manifest.host_permissions, ['https://www.zhipin.com/*', 'https://www.zhipin.cn/*']);
   assert.deepEqual(manifest.optional_host_permissions, ['https://*/*', 'http://*/*']);

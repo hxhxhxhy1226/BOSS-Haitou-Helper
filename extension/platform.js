@@ -188,6 +188,8 @@
     consumeAIDailyQuota: (limit) => quota('quota.consumeAI', { limit }),
     reserveDelivery: (jobId, limit) => quota('quota.reserve', { jobId, limit }),
     commitDelivery: (reservation, limit) => quota('quota.commit', { reservation, limit }),
+    markDeliveryClicked: (reservation) => quota('quota.markClicked', { reservation }),
+    cancelUnclickedDelivery: (reservation) => quota('quota.cancelUnclicked', { reservation }),
     releaseDelivery: (reservation) => reservation ? quota('quota.release', { reservation }) : Promise.resolve(false),
     request, fetch: nativeFetch,
   });

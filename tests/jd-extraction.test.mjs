@@ -854,7 +854,10 @@ test('独立详情自动流程：判断通过才点核验 scope 按钮，并发�
   const requests = mockAI(f);
   const clicked = [];
   f.doc.addEventListener('click', (event) => {
-    if (event.target.closest?.('.op-btn-chat')) { clicked.push(event.target); event.preventDefault(); }
+    if (event.target.closest?.('.op-btn-chat')) {
+      clicked.push(event.target); event.preventDefault();
+      f.BH.stop('fixture observed the scoped button');
+    }
   });
   const intended = f.doc.querySelector('.job-detail .op-btn-chat');
   const first = f.BH.autoChatOnDetail();

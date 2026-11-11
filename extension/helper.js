@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.0 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.1 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -1410,7 +1410,7 @@
   function dispatchDelivery(reservation) {
     if (native) throw new Error('扩展投递必须通过后台 commitDelivery 确认额度');
     if (!deliveryReservationValid(reservation)) return false;
-    const event = { ...reservation, status: 'dispatched' }; delete event.key;
+    const event = { ...reservation, status: 'dispatched', clickPending: true }; delete event.key;
     return writeDailyValue(reservation.key, event);
   }
   function releaseDelivery(reservation) {
@@ -1419,6 +1419,26 @@
     if (readDailyValue(reservation.key).some((e) => e.status === 'dispatched')) return;
     const event = { ...reservation, status: 'cancelled' }; delete event.key;
     writeDailyValue(reservation.key, event);
+  }
+  async function markDeliveryClicked(reservation) {
+    if (native) return native.markDeliveryClicked(reservation);
+    return withDailyStatsLock(() => {
+      const stored = readDailyValue(reservation.key).find((event) => event.status === 'dispatched');
+      if (!stored || stored.clickPending !== true) return false;
+      return writeDailyValue(reservation.key, { ...stored, clickPending: false, clickedAt: Date.now() });
+    });
+  }
+  // 只由本次执行在明确尚未调用按钮激活时撤销；旧待确认记录和已点击记录不能释放。
+  async function cancelUnclickedDelivery(reservation) {
+    if (!reservation) return false;
+    if (native) return native.cancelUnclickedDelivery(reservation);
+    return withDailyStatsLock(() => {
+      const records = readDailyValue(reservation.key);
+      if (records.some((event) => event.status === 'dispatched' && event.clickPending !== true)) return false;
+      const stored = records.find((event) => event.status === 'dispatched' && event.clickPending === true)
+        || records.find((event) => event.status === 'reserved');
+      return !!stored && writeDailyValue(reservation.key, { ...stored, status: 'cancelled', clickPending: false });
+    });
   }
   async function commitDelivery(reservation) {
     if (native) {
@@ -1842,7 +1862,7 @@
   function scrollIntoViewSafe(el, block = 'center') {
     if (!el) return;
     const behavior = isPageHidden() ? 'auto' : 'smooth';
-    try { el.scrollIntoView({ behavior, block }); } catch (_) {}
+    try { el.scrollIntoView({ behavior, block, inline: 'nearest' }); } catch (_) {}
   }
 
   async function simulateMouse(targetX, targetY, steps = 15) {
@@ -2714,7 +2734,7 @@
     .bh-ai-action:active { transform: scale(0.97); }
     .bh-ai-action.gray { background: rgba(60,60,67,0.06); color: rgba(60,60,67,0.85); }
     .bh-ai-action.gray:hover { background: rgba(60,60,67,0.12); }
-    /* v1.0.6：拉取按钮上方的常驻提醒标签（先保存再拉取） */
+    /* 拉取按钮上方的操作说明 */
     #bh-ai-modal .bh-ai-warn-hint {
       font-size: 11px;
       color: #b45309;
@@ -2877,6 +2897,9 @@
     .bh-tag-info { background: rgba(142,142,147,0.85); color: #fff; }
     .bh-tag-ai-pass { background: rgba(124,58,237,0.94); color: #fff; }
     .bh-tag-ai-skip { background: rgba(255,59,48,0.94); color: #fff; }
+    .bh-tag-not-sent { background: rgba(100,116,139,0.94); color: #fff; }
+    .bh-tag-pending { background: rgba(217,119,6,0.94); color: #fff; }
+    .bh-tag-matched { background: rgba(52,199,89,0.92); color: #fff; }
     .bh-tag-reason {
       display: block; font-weight: 400; font-size: 9px;
       opacity: .92; margin-top: 1px;
@@ -2899,7 +2922,11 @@
       info: '⏭ 已沟通过',
       'ai-pass': '🤖 AI 通过',
       'ai-skip': '🤖 AI 不匹配',
+      'not-sent': '⏸ 未投递',
+      pending: '⏳ 待确认',
+      matched: '✓ 筛选通过',
     }[kind] || kind;
+    t.title = kText + (reason ? '\n' + reason : '');
     t.innerHTML = `${kText}${reason ? `<span class="bh-tag-reason">${escapeHtml(reason)}</span>` : ''}`;
     card.appendChild(t);
   }
@@ -3469,7 +3496,7 @@
               <div style="display:flex;align-items:flex-end;gap:10px;width:100%;">
                 <label class="meta" style="flex:1;min-width:0;">
                   <div class="lbl">模型名</div>
-                  <div class="desc">不知道填什么就点右侧拉取</div>
+                  <div class="desc">拉取后选择模型，即可保存当前配置</div>
                   <input type="text" data-cfg="aiModel" list="bh-ai-model-list" placeholder="gpt-4o-mini" />
                 </label>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:0 0 auto;">
@@ -3637,8 +3664,7 @@
       if (!t) return;
       const act = t.dataset.act;
       if (act === 'aimodels') {
-        // v1.0.5：若有未保存改动，先在 AI 设置弹窗内提醒（见 requestModelList）
-        requestModelList();
+        await requestModelList(undefined, t);
       } else if (act === 'clearaicache') {
         clearAICache();
         addLog('🧹 AI 结论缓存已清空（今日计数不受影响）');
@@ -3660,7 +3686,7 @@
         if (act === 'aiendpointup' && card.previousElementSibling) card.parentElement.insertBefore(card, card.previousElementSibling);
         if (act === 'aiendpointdown' && card.nextElementSibling) card.parentElement.insertBefore(card.nextElementSibling, card);
         if (act === 'aiendpointtest') testAIConnection({ endpointId: card.dataset.endpointId });
-        if (act === 'aiendpointmodels') fetchAIModelList(card.dataset.endpointId);
+        if (act === 'aiendpointmodels') await requestModelList(card.dataset.endpointId, t);
         renderAIEndpointHealth();
       }
     });
@@ -3789,19 +3815,28 @@
     if (panelEls.btnAiLabel) panelEls.btnAiLabel.textContent = on ? 'AI 已开启 ✓（点击设置）' : 'AI 设置';
   }
 
-  // v1.0.5：AI 设置里有没有「改了但还没保存」的字段（用于拉取模型前的提醒）
+  // 只比较表单可编辑的有效值；存储对象的字段顺序不代表用户修改。
+  // 数组顺序仍保留，因为备用 API 的顺序决定调用优先级。
+  function aiSettingsSnapshot(input) {
+    const cfg = normalizeConfig(input);
+    const text = (value) => String(value ?? '').trim();
+    const keys = ['aiEnabled', 'aiPrimaryEnabled', 'aiFallback', 'aiDailyLimit',
+      'aiTimeoutMs', 'aiMaxJDChars', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts'];
+    const snapshot = Object.fromEntries(keys.map((key) => [key, cfg[key]]));
+    snapshot.aiBaseUrl = normalizeChatUrl(cfg.aiBaseUrl);
+    snapshot.aiModel = text(cfg.aiModel) || DEFAULT_CONFIG.aiModel;
+    for (const key of ['aiApiKey', 'aiUserPortrait', 'aiPromptTemplate']) snapshot[key] = text(cfg[key]);
+    snapshot.aiEndpoints = cfg.aiEndpoints.map((endpoint) => ({
+      id: String(endpoint.id), name: text(endpoint.name), enabled: endpoint.enabled !== false,
+      baseUrl: normalizeChatUrl(endpoint.baseUrl), apiKey: text(endpoint.apiKey), model: text(endpoint.model),
+    }));
+    return stableDailyJSON(snapshot);
+  }
+
+  // 关闭设置时提醒真正未保存的修改，等价的地址简写、空白和字段顺序不触发提醒。
   function hasUnsavedAISettings() {
     try {
-      const saved = loadConfig();
-      const cur = readConfig();
-      const keys = ['aiEnabled', 'aiPrimaryEnabled', 'aiEndpoints', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiUserPortrait',
-        'aiPromptTemplate', 'aiFallback', 'aiDailyLimit', 'aiTimeoutMs',
-        'aiMaxJDChars', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts'];
-      return keys.some(function (k) {
-        const a = cur[k] === undefined ? '' : cur[k];
-        const b = saved[k] === undefined ? '' : saved[k];
-        return JSON.stringify(a) !== JSON.stringify(b);
-      });
+      return aiSettingsSnapshot(readConfig()) !== aiSettingsSnapshot(loadConfig());
     } catch (_) {
       return false;
     }
@@ -3880,30 +3915,18 @@
     });
   }
 
-  // v1.0.5：拉取模型前的「未保存」提醒
-  function requestModelList() {
-    const run = () => fetchAIModelList().catch(function (e) {
-      addLog('拉取模型异常：' + (e && e.message ? e.message : e), 'err');
-    });
-    if (!hasUnsavedAISettings()) { run(); return; }
-    showAIConfirm({
-      title: '配置尚未保存',
-      message: '拉取模型会读取输入框里的最新内容，但拉取后自动填入的模型名不会落盘。\n建议先保存配置，避免下次打开时丢失。',
-      okText: '保存并拉取',
-      cancelText: '仍然拉取',
-      onOk: async () => {
-        try {
-          const cfg = readConfig();
-          await applyConfig(cfg);
-          syncAISettingsButton(cfg);
-          addLog('✅ 配置已保存，开始拉取模型…');
-        } catch (err) {
-          addLog('❌ 保存失败：' + (err && err.message ? err.message : err), 'err');
-        }
-        run();
-      },
-      onCancel: run,
-    });
+  // 拉取仅查询当前填写的接口，不要求预先保存；选择模型后统一校验并保存。
+  async function requestModelList(endpointId, button) {
+    if (button?.disabled) return;
+    const label = button?.textContent;
+    if (button) { button.disabled = true; button.textContent = '拉取中…'; }
+    try {
+      await fetchAIModelList(endpointId);
+    } catch (error) {
+      addLog('拉取模型异常：' + (error?.message || error), 'err');
+    } finally {
+      if (button) { button.disabled = false; button.textContent = label; }
+    }
   }
 
   // 按钮按下去后短暂显示反馈文字，再恢复
@@ -3967,7 +3990,7 @@
     setChk('aiEnabled', cfg.aiEnabled === true);
     setChk('aiPrimaryEnabled', cfg.aiPrimaryEnabled !== false);
     renderAIEndpointCards(cfg.aiEndpoints || []);
-    set('aiBaseUrl', cfg.aiBaseUrl || DEFAULT_CONFIG.aiBaseUrl);
+    set('aiBaseUrl', cfg.aiBaseUrl ?? DEFAULT_CONFIG.aiBaseUrl);
     set('aiModel', cfg.aiModel || DEFAULT_CONFIG.aiModel);
     set('aiApiKey', cfg.aiApiKey || '');
     set('aiUserPortrait', cfg.aiUserPortrait || '');
@@ -4030,7 +4053,7 @@
     }) : (Array.isArray(prev.aiEndpoints) ? prev.aiEndpoints.map((endpoint) => ({ ...endpoint })) : []);
     cfg.aiProvider = prev.aiProvider || DEFAULT_CONFIG.aiProvider;
     // 只填到 .../v1 会自动补成 .../v1/chat/completions（避免 POST /v1 → 404）
-    cfg.aiBaseUrl  = g('aiBaseUrl')  ? normalizeChatUrl(gv('aiBaseUrl'))  : (prev.aiBaseUrl  || DEFAULT_CONFIG.aiBaseUrl);
+    cfg.aiBaseUrl  = g('aiBaseUrl')  ? normalizeChatUrl(gv('aiBaseUrl'))  : (prev.aiBaseUrl  ?? DEFAULT_CONFIG.aiBaseUrl);
     cfg.aiApiKey   = g('aiApiKey')   ? gv('aiApiKey')                    : (prev.aiApiKey   || '');
     cfg.aiModel    = g('aiModel')    ? (gv('aiModel') || DEFAULT_CONFIG.aiModel) : (prev.aiModel || DEFAULT_CONFIG.aiModel);
     cfg.aiUserPortrait   = g('aiUserPortrait')   ? gv('aiUserPortrait')   : (prev.aiUserPortrait   || '');
@@ -4895,19 +4918,6 @@
     // 填进 datalist，输入框获得原生下拉补全
     const dl = document.getElementById('bh-ai-model-list');
     if (dl) dl.innerHTML = ids.slice(0, 300).map((id) => `<option value="${escapeHtml(id)}"></option>`).join('');
-    // 模型名空着就顺手选一个便宜的（v1.0.1：AI 输入框可能在弹窗里，用 document 范围查找）
-    const input = endpointId && endpointId !== 'primary'
-      ? Array.from(document.querySelectorAll('[data-endpoint-id]')).find((c) => c.dataset.endpointId === endpointId)?.querySelector('[data-endpoint-field="model"]')
-      : document.querySelector('[data-cfg="aiModel"]');
-    if (input && !String(input.value || '').trim()) {
-      // 依次优先：4o-mini > 任意 mini > 4o > 列表第一项（便宜的判断模型优先）
-      const pref = ids.find((x) => /4o-mini/i.test(x))
-        || ids.find((x) => /mini/i.test(x))
-        || ids.find((x) => /4o/i.test(x))
-        || ids[0];
-      input.value = pref;
-      addLog(`已自动填入模型：${pref}（可点「🔄 获取模型」重新选择）`);
-    }
     addLog(`✅ 拉到 ${ids.length} 个模型，点击选择即可`);
     showModelPicker(ids, url, endpointId);
   }
@@ -4929,8 +4939,9 @@
           <button data-act="close" style="background:transparent;border:none;font-size:18px;cursor:pointer;color:#86909c;line-height:1;">×</button>
         </div>
         <div style="flex:1;overflow:auto;padding:10px 12px;">${items}</div>
+        <div data-model-error role="alert" style="display:none;padding:8px 16px;color:#c73535;font-size:12px;overflow-wrap:anywhere;"></div>
         <div style="padding:9px 16px;border-top:1px solid #f0f1f3;color:#86909c;font-size:11px;">
-          点击即填入模型名并保存。判断类任务建议选便宜的小模型（如 gpt-4o-mini 级别）。
+          点击模型后保存当前配置。判断类任务建议选便宜的小模型（如 gpt-4o-mini 级别）。
         </div>
       </div>
     `;
@@ -4946,12 +4957,16 @@
         ? Array.from(document.querySelectorAll('[data-endpoint-id]')).find((c) => c.dataset.endpointId === endpointId)?.querySelector('[data-endpoint-field="model"]')
         : document.querySelector('[data-cfg="aiModel"]');
       if (input) input.value = id;
+      const saveError = m.querySelector('[data-model-error]');
+      saveError.style.display = 'none';
       try {
         const cfg = readConfig();
         validateAIEndpointSettings(cfg);
         await applyConfig(cfg);
       } catch (error) {
-        addLog('模型已填入，但保存失败：' + (error?.message || error), 'err');
+        saveError.textContent = '模型已填入，但保存失败：' + (error?.message || error);
+        saveError.style.display = 'block';
+        addLog(saveError.textContent, 'err');
         return;
       }
       addLog(`✓ 已选择模型：${id}（已保存）`, 'send');
@@ -5782,7 +5797,7 @@
   // 只把本次点击后新出现的官方提示、或当前职位按钮的状态变化视为确认。
   // 面板日志、职位正文、旧弹窗与跳到聊天页本身，都不能证明本次招呼已发送。
   const CONTACT_NOTICE_SEL = '.boss-dialog__wrapper, .boss-dialog, .dialog-wrap, .dialog-container, .dialog, .modal, [role="dialog"], .dialog-title, .modal-title, .toast, .toast-message, .message-tip, [role="alert"], [role="status"]';
-  const CONTACT_SUCCESS_RE = /已向\s*BOSS\s*发送消息|打招呼成功|消息已发送|沟通成功/i;
+  const CONTACT_SUCCESS_RE = /已向\s*BOSS\s*发送消息|打招呼成功|消息已发送|沟通成功|招呼已发送|已发送招呼|已成功打招呼/i;
   const CONTACT_FAILURE_RE = /沟通失败|发送失败|(?:今日|每天|每日).{0,20}(?:沟通|打招呼).{0,20}(?:上限|用完)|操作过于频繁|请稍后再试|请先登录|登录失效/;
   function contactNoticeSignature(text) {
     const failure = text.match(CONTACT_FAILURE_RE);
@@ -5844,7 +5859,7 @@
     }
     return null;
   }
-  async function waitForOfficialContactResult(context, timeoutMs = 4000) {
+  async function waitForOfficialContactResult(context, timeoutMs = 8000) {
     const until = Date.now() + timeoutMs;
     do {
       const result = readOfficialContactResult(context);
@@ -5855,22 +5870,61 @@
     return { status: 'unconfirmed', reason: '尚未收到当前职位的官方成功提示，请在 BOSS 消息中核对' };
   }
   async function performOfficialContact(button, expected, guard, reservation) {
-    let context = null, clicked = false, clickError = '';
+    let context = null, activated = false, committed = false, clickError = '', cleanupError = '', resultPromise = null;
+    const allowed = () => !state.stopFlag && !state.paused && state.config?.autoSend
+      && deliveryReservationValid(reservation) && (!guard || guard());
+    const currentButton = () => allowed() ? snapshotChatButton(extractJobSnapshot(expected)) : null;
     try {
-      clicked = await humanClick(button, guard, async () => {
-        if (!await commitDelivery(reservation)) return false;
-        context = captureOfficialContactContext(expected, button);
-        return true;
-      });
+      // 滚动与鼠标准备均在提交占额之前；准备期间允许网站重建同岗位按钮。
+      const initial = currentButton();
+      if (initial) {
+        scrollIntoViewSafe(initial, 'nearest');
+        await sleep(randInt(200, 400));
+        const ready = currentButton();
+        if (ready) {
+          const rect = ready.getBoundingClientRect();
+          await simulateMouse(rect.left + rect.width / 2, rect.top + rect.height / 2, 10);
+        }
+      }
+      // 仅在尚未激活时，为短暂重渲染最多重新定位两次，不重复 AI 判断或发送。
+      for (let attempt = 0; attempt < 3 && !activated; attempt++) {
+        if (state.stopFlag || state.paused || !state.config?.autoSend) break;
+        let target = currentButton();
+        if (target && !committed) {
+          committed = await commitDelivery(reservation);
+          if (!committed) break;
+          target = currentButton(); // 后台存储返回后取最新节点，不再绑定等待前的旧节点。
+        }
+        if (target && committed) {
+          context = captureOfficialContactContext(expected, target);
+          // 从最后复核到激活保持同步。原 mousedown → 等待 → click 会被重渲染打断。
+          activated = true;
+          target.click();
+          break;
+        }
+        if (attempt < 2) await sleep(200);
+      }
     } catch (error) { clickError = String(error?.message || error); }
-    finally { await releaseDelivery(reservation); refreshStats(); }
-    const initiated = readDailyValue(reservation.key).some((event) => event.status === 'dispatched');
-    if (!initiated) return { status: 'not-started', reason: clickError || '页面、规则或运行状态已改变，未发起沟通' };
-    // 提交额度之后，即使中途停止、页面卸载或鼠标事件抛错，也不能释放额度后重发。
-    const result = await waitForOfficialContactResult(context);
-    if (result.status === 'unconfirmed' && (!clicked || clickError)) {
+    finally {
+      // 立即观察回执，避免后台写入较慢时漏掉一闪而过的成功提示。
+      if (activated) resultPromise = waitForOfficialContactResult(context).catch(() => ({
+        status: 'unconfirmed', reason: '未能读取当前职位的官方回执，请在 BOSS 消息中核对',
+      }));
+      try {
+        if (activated) await markDeliveryClicked(reservation);
+        else await cancelUnclickedDelivery(reservation);
+      } catch (error) { cleanupError = String(error?.message || error); }
+      refreshStats();
+    }
+    if (!activated) return { status: 'not-started', reason: [clickError || (state.stopFlag ? '已停止，尚未点击沟通'
+      : state.paused ? '已暂停，尚未点击沟通' : '岗位、规则或按钮状态已改变，未点击沟通'),
+      cleanupError ? '撤销预留失败：' + cleanupError : ''].filter(Boolean).join('；') };
+    // 激活一旦被调用，异常或没有回执都不能自动重发；保留占额以防重复联系。
+    const result = await resultPromise;
+    if (result.status === 'unconfirmed' && clickError) {
       result.reason = '沟通事件派发中断，发送结果待确认；本次额度已保留，请在 BOSS 消息中核对';
     }
+    if (cleanupError) addLog('沟通占额已保留，点击记录更新失败：' + cleanupError, 'err');
     if (result.status === 'rejected') {
       state.stopFlag = true;
       state._lastRisk = 'BOSS 未确认本次沟通：' + result.reason;
@@ -5886,19 +5940,34 @@
       if (card?.isConnected) tagCard(card, 'pass', '官方已确认');
       addLog(`✓ ${title} | BOSS 官方已确认沟通（招呼内容使用手机端默认设置）`, 'send');
     } else if (result.status === 'not-started') {
+      if (card?.isConnected) tagCard(card, 'not-sent', result.reason);
       addLog(`✗ ${title} | ${result.reason}`, 'skip');
     } else {
-      if (card?.isConnected) tagCard(card, 'skip', result.status === 'rejected' ? '官方提示失败' : '已发起·待确认');
+      if (card?.isConnected) tagCard(card, result.status === 'rejected' ? 'not-sent' : 'pending', result.status === 'rejected' ? result.reason : '已点击沟通，等待官方确认');
       addLog(`${result.status === 'rejected' ? '✗' : '⚠'} ${title} | ${result.status === 'rejected' ? '官方提示失败' : '已发起沟通，待确认'}：${result.reason}；为避免重复，本次占额保留`, result.status === 'rejected' ? 'err' : 'info');
     }
     refreshStats();
+  }
+
+  function deliveryUnavailableReason(jobId) {
+    if (!statsPersistenceAvailable()) return '无法持久化今日计数，请检查扩展存储';
+    const hash = jobId ? stableAIHash(String(jobId)) : '';
+    const previous = hash && dailyEvents().find((event) => event.kind === 'sent' && event.jobHash === hash
+      && (event.status === 'dispatched' || event.status === 'reserved' && event.expiresAt > Date.now()));
+    if (previous) return previous.status === 'reserved' || previous.clickPending === true
+      ? '其他标签正在投递该职位，请稍后重试' : '该职位今日已有沟通记录，请先在 BOSS 消息中核对';
+    const stats = loadStats(), limit = state.config.dailyLimit;
+    if (stats.sent >= limit) return `今日额度已用完（${stats.sent}/${limit}）`;
+    if (stats.sent + stats.pending >= limit) return '剩余名额正被其他标签使用，请稍后重试';
+    return '暂未取得投递名额，请稍后重试';
   }
 
   async function processOne(card) {
     if (state._jobProcessing || state._detailProcessing) return;
     state._jobProcessing = true;
     try { return await processOneInner(card); }
-    finally { state._jobProcessing = false; }
+    catch (error) { if (card?.isConnected) tagCard(card, 'not-sent', '处理异常：' + (error?.message || error)); throw error; }
+    finally { state._jobProcessing = false; if (card) delete card.dataset.bhProcessing; }
   }
 
   async function processOneInner(card) {
@@ -5912,6 +5981,10 @@
 
     const expected = readJobCard(card);
     let { title, company } = expected;
+    const notSent = (reason) => {
+      if (card?.isConnected) tagCard(card, 'not-sent', reason);
+      addLog(`✗ ${title || '(无标题)'} | 未投递：${reason}`, 'skip');
+    };
     const jdCard = expected.jdCard;
     const hr = expected.hrText;
     if (!title) {
@@ -6006,9 +6079,9 @@
     // ===== AI 语义判断：包括排除词；本地仅先检查活跃度 =====
     if (state.config.aiEnabled) {
       const gate = await runAIGate(card, job);
-      if (gate.action === 'stop') return;
+      if (gate.action === 'stop') { notSent('已停止，未执行沟通'); return; }
       if (!cardStillMatches(card, expected) || !snapshotStillCurrent(snapshot, expected, job, card)) {
-        addLog(`✗ ${title} | 判断期间岗位内容已改变，未执行沟通`, 'skip');
+        notSent('判断期间岗位内容已改变，未执行沟通');
         return;
       }
 
@@ -6018,6 +6091,7 @@
         setStatus('alert');
         state._lastRisk = describeRisk(riskAfterAI) || 'AI 后风控';
         addLog('⚠ AI 判断后检测到风控，已停止', 'err');
+        tagCard(card, 'not-sent', 'AI 判断后检测到风控，已停止');
         state.stopFlag = true;
         return;
       }
@@ -6038,7 +6112,7 @@
       decisionFallback = gate.degraded ? 'local' : null;
       const currentResult = matchJob(jd, activeText, sal, state.config, vars, job);
       if (!currentResult.matched || decisionPolicy !== aiCacheFingerprint()) {
-        addLog(`✗ ${title} | ${currentResult.matched ? '筛选规则已变化，本次结论已作废' : currentResult.reason}`, 'skip');
+        notSent(currentResult.matched ? '筛选规则已变化，本次结论已作废' : currentResult.reason);
         return;
       }
       // gate.action === 'accept'
@@ -6053,7 +6127,7 @@
     }
 
     if (!state.config.autoSend) {
-      tagCard(card, 'pass', '标记通过（未自动发）');
+      tagCard(card, 'matched', '自动投递已关闭');
       addLog(`✓ ${title} | 标记通过`, 'send');
       return;
     }
@@ -6064,7 +6138,7 @@
     let chatBtn = null;
     for (let i = 0; i < 20; i++) {
       if (!state.config.autoSend || !rulesStillCurrent() || !cardStillMatches(card, expected) || !snapshotStillCurrent(snapshot, expected, job, card)) {
-        addLog(`✗ ${title} | 岗位内容、筛选规则或运行状态已改变，未执行沟通`, 'skip');
+        notSent('岗位内容、筛选规则或运行状态已改变，未执行沟通');
         return;
       }
       chatBtn = snapshotChatButton(extractJobSnapshot(expected));
@@ -6073,7 +6147,7 @@
     }
     if (!chatBtn) {
       addLog('✗ 未找到 a.op-btn-chat "立即沟通"（点击查看）', 'err', listSuspiciousBtns());
-      tagCard(card, 'skip', '未找到按钮');
+      tagCard(card, 'not-sent', '未找到当前岗位的沟通按钮');
       const s = loadStats(); s.errors = (s.errors || 0) + 1; saveStats(s); refreshStats();
       return;
     }
@@ -6083,13 +6157,12 @@
     await sleep(humanDelay(500, 1500));
     const reservation = await reserveDelivery(job.jobId, state.config.dailyLimit);
     if (!reservation) {
-      addLog(statsPersistenceAvailable() ? `✗ ${title} | 今日额度已用完、其他标签正在投递或该职位今日已投`
-        : '投递已停止：无法持久化今日计数，请检查扩展存储', 'skip');
+      notSent(deliveryUnavailableReason(job.jobId));
       return;
     }
     const resultContact = await performOfficialContact(chatBtn, expected,
       () => deliveryReservationValid(reservation) && state.config.autoSend && rulesStillCurrent() && cardStillMatches(card, expected)
-        && snapshotStillCurrent(snapshot, expected, job, card) && snapshotChatButton(extractJobSnapshot(expected)) === chatBtn,
+        && snapshotStillCurrent(snapshot, expected, job, card),
       reservation);
     logOfficialContactResult(resultContact, title, card);
   }
@@ -6248,13 +6321,11 @@
 
     reservation = await reserveDelivery(job.jobId, state.config.dailyLimit || 50);
     if (!reservation) {
-      addLog(statsPersistenceAvailable() ? '详情页未执行沟通：今日额度已用完、其他标签正在投递或该职位今日已投'
-        : '详情页未执行沟通：无法持久化今日计数', 'skip');
+      addLog('详情页未执行沟通：' + deliveryUnavailableReason(job.jobId), 'skip');
       return 'skipped';
     }
     const resultContact = await performOfficialContact(btn, expected,
-      () => allowed() && rulesStillCurrent() && snapshotStillCurrent(snapshot, expected, job)
-        && snapshotChatButton(extractJobSnapshot(expected)) === btn, reservation);
+      () => allowed() && rulesStillCurrent() && snapshotStillCurrent(snapshot, expected, job), reservation);
     logOfficialContactResult(resultContact, job.title);
     if (resultContact.status === 'not-started') return 'skipped';
     // 已确认时再返回列表；待确认或失败时保留现场供用户核对。
@@ -6440,7 +6511,7 @@
       setPanelVisible(visible) { if (panel) { panel.hidden = !visible; if (visible) panel.classList.remove('bh-collapsed'); } },
       state, loadConfig, loadStats, resetStats, saveStats, matchJob, addLog, runAIGate, applyConfig,
       todayKey, statsPersistenceAvailable, consumeAIDailyQuota, reserveDelivery, dispatchDelivery, releaseDelivery, deliveryReservationValid,
-      commitDelivery, captureOfficialContactContext, readOfficialContactResult, waitForOfficialContactResult, performOfficialContact,
+      commitDelivery, markDeliveryClicked, cancelUnclickedDelivery, captureOfficialContactContext, readOfficialContactResult, waitForOfficialContactResult, performOfficialContact,
       // v1.0.14：活跃度解析暴露给测试 —— 排查"在线却被判 N 天前"这类误判要用它
       parseActiveDays, parseSalaryK,
       readScopedText, isReadableElement, extractDescription, collectJobDescriptionText, collectText,

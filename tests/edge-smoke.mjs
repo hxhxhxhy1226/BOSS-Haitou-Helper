@@ -9,9 +9,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 // fileURLToPath preserves spaces and non-ASCII Windows workspace names.
 const { fileURLToPath } = await import('node:url');
 const cwd = fileURLToPath(new URL('..', import.meta.url));
+const manifest = JSON.parse(await fs.readFile(path.join(cwd, 'extension', 'manifest.json'), 'utf8'));
+const extensionVersion = manifest.version;
 const output = path.join(cwd, 'artifacts');
 const profile = path.join(output, 'edge-extension-' + Date.now());
-const extension = path.join(cwd, 'dist', 'boss-helper-edge-1.1.0');
+const extension = path.join(cwd, 'dist', 'boss-helper-edge-' + extensionVersion);
 await fs.mkdir(profile, { recursive: true });
 const binary = process.env.EDGE_BINARY || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const child = spawn(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
@@ -53,9 +55,12 @@ const fixture = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>
   <h1>Edge 独立扩展验收 · 本地模拟职位</h1><p>无油猴、无真实账号；网站请求全部由本地测试接管。</p>
   <ul class="job-list-wrapper"><li class="job-card-box" data-jobid="fixture01"><a class="job-name" href="/job_detail/extensionFixture.html">嵌入式软件工程师</a><span class="job-salary">20-30K</span><ul class="tag-list"><li>本科</li><li>3-5年</li></ul><a class="company-name" href="/gongsi/fixture.html">本地测试公司</a><div class="job-card-footer"><span class="time">刚刚活跃</span></div></li></ul>
   <main id="detail-host">${detail}</main><script>
-  window.fixtureClicks=0;
-  function bindContact(){document.querySelector('.op-btn-chat').addEventListener('click',function(e){e.preventDefault();fixtureClicks++;this.textContent='继续沟通';const box=document.createElement('div');box.className='boss-dialog';box.setAttribute('role','dialog');box.textContent='已向BOSS发送消息';document.body.append(box);});}
-  bindContact(); document.querySelector('.job-card-box').addEventListener('click',function(e){e.preventDefault();document.querySelector('#detail-host').innerHTML=${JSON.stringify(detail)};bindContact();});
+  window.fixtureClicks=0; window.fixtureReplacements=0; window.fixtureClickedGeneration=0;
+  let fixtureReplaceTimer=null, fixtureReplaceDeadline=null;
+  function stopRebuilding(){clearInterval(fixtureReplaceTimer);clearTimeout(fixtureReplaceDeadline);fixtureReplaceTimer=null;fixtureReplaceDeadline=null;}
+  function bindContact(){document.querySelector('.op-btn-chat').addEventListener('click',function(e){e.preventDefault();fixtureClicks++;fixtureClickedGeneration=Number(this.dataset.fixtureGeneration||0);stopRebuilding();this.textContent='继续沟通';const box=document.createElement('div');box.className='boss-dialog';box.setAttribute('role','dialog');box.textContent='已向BOSS发送消息';document.body.append(box);});}
+  function startRebuilding(){stopRebuilding();fixtureReplaceTimer=setInterval(function(){const old=document.querySelector('.op-btn-chat');if(!old||fixtureClicks){stopRebuilding();return;}const current=old.cloneNode(true);current.dataset.fixtureGeneration=String(++fixtureReplacements);old.replaceWith(current);bindContact();},80);fixtureReplaceDeadline=setTimeout(stopRebuilding,6000);}
+  bindContact(); document.querySelector('.job-card-box').addEventListener('click',function(e){e.preventDefault();document.querySelector('#detail-host').innerHTML=${JSON.stringify(detail)};bindContact();startRebuilding();});
   </script></html>`;
 try {
   const portFile = await until(async () => { try { return await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8'); } catch { return null; } });
@@ -89,7 +94,7 @@ try {
   const workerUrl = new URL(worker.url);
   const extensionOrigin = workerUrl.protocol + '//' + workerUrl.host;
   const workerSession = workerSessions.get(worker.targetId);
-  check((await evaluate(workerSession, 'chrome.runtime.getManifest().version')) === '1.1.0', 'Edge 实际加载 Manifest V3 扩展与后台');
+  check((await evaluate(workerSession, 'chrome.runtime.getManifest().version')) === extensionVersion, 'Edge 实际加载 Manifest V3 扩展与后台');
   const target = await send('Target.createTarget', { url: 'about:blank' });
   const page = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
   handlers.add((event) => {
@@ -116,6 +121,8 @@ try {
   await evaluate(page, "document.querySelector('[data-act=toggle]').click()");
   await until(() => evaluate(page, 'fixtureClicks===1'), 20000);
   await until(() => evaluate(page, "document.querySelector('.bh-log').textContent.includes('官方已确认')"));
+  check(await evaluate(page, 'fixtureClicks===1 && fixtureReplacements>1 && fixtureClickedGeneration===fixtureReplacements && fixtureReplaceTimer===null'), '同岗位按钮持续重建后只激活最新按钮一次，并获得官方确认');
+  await until(() => evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).some(x=>x?.kind==='sent'&&x.status==='dispatched'&&x.clickPending===false&&x.clickedAt>0))"));
   const sent = await evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).filter(x=>x?.kind==='sent'&&x.status==='dispatched').length)");
   check(sent === 1, '模拟岗位经筛选后仅点击一次，后台已持久化额度，官方回执识别成功');
   const bossTabId = await evaluate(workerSession, "chrome.tabs.query({}).then(t=>t.find(x=>x.url?.includes('extension-local-test')).id)");
@@ -129,6 +136,19 @@ try {
   check(await evaluate(page, 'fixtureClicks===0'), '刷新恢复已保存配置，页面不会自动重新投递');
   await evaluate(page, `(()=>{document.querySelector('[data-act=aiopen]').click();const f=k=>document.querySelector('#bh-ai-modal [data-cfg="'+k+'"]');f('aiBaseUrl').value='https://api.fixture.example/v1';f('aiApiKey').value='fixture-only-key';f('aiModel').value='fixture-model';document.querySelector('#bh-ai-modal [data-act=aisave]').click();})()`);
   await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.aiApiKey==='fixture-only-key')"));
+  await until(() => evaluate(page, "document.querySelector('.bh-log').textContent.includes('AI 设置已保存')"));
+  await evaluate(page, `(()=>{document.querySelector('#bh-ai-modal [data-act=aiendpointadd]').click();const card=document.querySelector('#bh-ai-endpoint-list [data-endpoint-id]');for(const [key,value] of Object.entries({name:'备用测试',baseUrl:'https://backup.fixture.example/v1',apiKey:'fixture-backup-key',model:'backup-model'})){card.querySelector('[data-endpoint-field="'+key+'"]').value=value;}document.querySelector('#bh-ai-modal [data-act=aisave]').click();})()`);
+  await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.aiEndpoints?.[0]?.apiKey==='fixture-backup-key')"));
+  await until(() => evaluate(page, "document.querySelector('#bh-ai-endpoint-list [data-endpoint-field=baseUrl]')?.value.endsWith('/chat/completions')"));
+  await evaluate(page, "document.querySelector('#bh-ai-modal [data-act=aiclose]').click()");
+  check(await evaluate(page, "!document.querySelector('#bh-ai-confirm') && !document.querySelector('#bh-ai-modal')"), '真实扩展存储保存备用 API 后关闭，不误报未保存');
+  await evaluate(page, "document.querySelector('[data-act=aiopen]').click()");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await evaluate(page, "document.querySelector('#bh-ai-modal [data-act=aimodels]').click()");
+    await until(() => evaluate(page, "document.querySelector('#bh-detail-modal [data-role=body]')?.value.includes('尚未授权')"));
+    check(await evaluate(page, "!document.querySelector('#bh-ai-confirm') && !document.querySelector('#bh-ai-modal [data-act=aimodels]').disabled"), `保存后第 ${attempt + 1} 次拉取直接进入请求，按真实权限状态反馈并恢复按钮`);
+    await evaluate(page, "document.querySelector('#bh-detail-modal [data-act=ok]').click()");
+  }
   await evaluate(page, "document.querySelector('#bh-ai-modal [data-act=aitest]').click()");
   await until(() => evaluate(page, "document.querySelector('#bh-detail-modal [data-role=body]')?.value.includes('尚未授权')"));
   check(await evaluate(page, 'fixtureClicks===0 && localStorage.getItem("boss_helper_config_v1")===null'), '未授权 AI 域名在真实后台被拦截，测试连接不启动投递或泄露到网站存储');
@@ -146,7 +166,7 @@ try {
   await fs.writeFile(path.join(output, 'edge-extension-popup.png'), Buffer.from(popupShot.data, 'base64'));
   check(pageErrors.length === 0, '真实内容脚本无未捕获页面异常');
   await fs.writeFile(path.join(output, 'edge-extension-report.json'), JSON.stringify({ status: 'passed', checks, pageErrors,
-    extensionVersion: '1.1.0', browser: await send('Browser.getVersion') }, null, 2));
+    extensionVersion, browser: await send('Browser.getVersion') }, null, 2));
 } catch (error) {
   await fs.writeFile(path.join(output, 'edge-extension-failure.log'), String(error.stack) + '\n' + browserLog);
   throw error;

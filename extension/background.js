@@ -114,7 +114,7 @@ function createBossNativeBackground(api, dependencies = {}) {
           value = await append(values, { date: day(), kind: 'sent', status: 'reserved', jobHash: hash,
             owner: owner(sender), ts: now(), expiresAt: now() + 60000 });
         }
-      } else if (action === 'quota.commit' || action === 'quota.release') {
+      } else if (['quota.commit', 'quota.release', 'quota.markClicked', 'quota.cancelUnclicked'].includes(action)) {
         const reservation = message.reservation;
         const key = typeof reservation?.key === 'string' ? reservation.key : '';
         const stored = key.startsWith(EVENT + day() + '_') ? values[key] : null;
@@ -122,9 +122,19 @@ function createBossNativeBackground(api, dependencies = {}) {
         if (valid && action === 'quota.release') {
           if (stored.status === 'reserved') { const event = { ...stored, status: 'cancelled' }; await persist({ [key]: event }); values[key] = event; }
           value = true;
-        } else if (valid && stored.status === 'reserved' && stored.expiresAt > now() && values[CONFIG]?.autoSend !== false
+        } else if (valid && action === 'quota.commit' && stored.status === 'reserved' && stored.expiresAt > now() && values[CONFIG]?.autoSend !== false
           && current.sent < maximum(values, message.limit, 'dailyLimit', 50)) {
-          const event = { ...stored, status: 'dispatched' };
+          // Hold quota durably before activation, while allowing the owner to cancel a
+          // preparation that the content script can prove never attempted a click.
+          const event = { ...stored, status: 'dispatched', clickPending: true };
+          await persist({ [key]: event }); values[key] = event; value = true;
+        } else if (valid && action === 'quota.markClicked' && stored.status === 'dispatched' && stored.clickPending === true) {
+          const event = { ...stored, clickPending: false, clickedAt: now() };
+          await persist({ [key]: event }); values[key] = event; value = true;
+        } else if (valid && action === 'quota.cancelUnclicked' && (stored.status === 'reserved'
+          || stored.status === 'dispatched' && stored.clickPending === true)) {
+          // Missing clickPending belongs to older, possibly sent records: never release it.
+          const event = { ...stored, status: 'cancelled', clickPending: false };
           await persist({ [key]: event }); values[key] = event; value = true;
         }
       }
@@ -246,7 +256,7 @@ function createBossNativeBackground(api, dependencies = {}) {
         if (keys.some((key) => key in values)) throw error('扩展存储删除失败', 'STORAGE_FAILED');
         return { ok: true, value: true, values };
       });
-      if (['quota.consumeAI', 'quota.reserve', 'quota.commit', 'quota.release'].includes(action)) return await quota(action, message, sender);
+      if (['quota.consumeAI', 'quota.reserve', 'quota.commit', 'quota.release', 'quota.markClicked', 'quota.cancelUnclicked'].includes(action)) return await quota(action, message, sender);
       if (action === 'network.fetch') return await network(message, sender);
       if (action === 'network.abort') {
         const pending = requests.get(owner(sender) + ':' + String(message.requestId));

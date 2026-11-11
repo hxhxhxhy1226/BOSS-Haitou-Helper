@@ -224,6 +224,142 @@ test('failed or silently dropped quota persistence never authorizes dispatch', a
   }
 });
 
+test('activation markers persist before resolving, reach other tabs and cannot free an attempted delivery', async () => {
+  const f = fixture(), native = f.platform(), observer = f.platform(sender(2));
+  await Promise.all([native.ready, observer.ready]);
+  const reservation = await native.reserveDelivery('activation-marker', 2);
+  assert.equal(await native.commitDelivery(reservation, 2), true);
+  assert.equal(f.data[reservation.key].status, 'dispatched');
+  assert.equal(f.data[reservation.key].clickPending, true);
+  assert.equal(f.worker.stats(f.data).sent, 1, 'Quota remains occupied before activation');
+  let release;
+  f.setGate = new Promise((resolve) => { release = resolve; });
+  let completed = false;
+  const marking = native.markDeliveryClicked(reservation).then((value) => { completed = value; });
+  await delay(0);
+  assert.equal(completed, false);
+  assert.equal(f.data[reservation.key].clickPending, true);
+  release(); await marking;
+  assert.equal(completed, true);
+  assert.equal(f.data[reservation.key].clickPending, false);
+  assert.equal(f.data[reservation.key].clickedAt, FIXED_TIME);
+  assert.equal(native.getValue(reservation.key).clickPending, false);
+  assert.equal(observer.getValue(reservation.key).clickedAt, FIXED_TIME);
+  assert.equal(await native.markDeliveryClicked(reservation), false, 'The marker only transitions once');
+  assert.equal(await native.cancelUnclickedDelivery(reservation), false);
+  await native.releaseDelivery(reservation);
+  assert.equal(f.data[reservation.key].status, 'dispatched');
+  assert.equal(f.create().stats(f.data).sent, 1);
+  assert.equal(await native.reserveDelivery('activation-marker', 2), false);
+});
+
+test('a committed preparation proven unclicked can be cancelled and the same job reserved again', async () => {
+  const f = fixture(), native = f.platform(), observer = f.platform(sender(2));
+  await Promise.all([native.ready, observer.ready]);
+  const reservation = await native.reserveDelivery('unclicked-preparation', 2);
+  await native.commitDelivery(reservation, 2);
+  await native.releaseDelivery(reservation);
+  assert.equal(f.data[reservation.key].status, 'dispatched', 'Ordinary release keeps committed quota');
+  let release;
+  f.setGate = new Promise((resolve) => { release = resolve; });
+  let cancelled = false;
+  const cancelling = native.cancelUnclickedDelivery(reservation).then((value) => { cancelled = value; });
+  await delay(0);
+  assert.equal(cancelled, false);
+  assert.equal(f.worker.stats(f.data).sent, 1);
+  release(); await cancelling;
+  assert.equal(cancelled, true);
+  assert.equal(f.data[reservation.key].status, 'cancelled');
+  assert.equal(f.data[reservation.key].clickPending, false);
+  assert.equal(observer.getValue(reservation.key).status, 'cancelled');
+  assert.equal(f.create().stats(f.data).sent, 0);
+  assert.equal(await native.markDeliveryClicked(reservation), false);
+  assert.equal(await native.cancelUnclickedDelivery(reservation), false);
+  const retry = await native.reserveDelivery('unclicked-preparation', 2);
+  assert.ok(retry);
+  assert.notEqual(retry.key, reservation.key);
+});
+
+test('cancelling an uncommitted reservation releases only pending quota and never marks it clicked', async () => {
+  const f = fixture(), native = f.platform(); await native.ready;
+  const reservation = await native.reserveDelivery('cancel-reserved', 2);
+  assert.equal(await native.markDeliveryClicked(reservation), false);
+  assert.equal(await native.cancelUnclickedDelivery(reservation), true);
+  assert.equal(f.data[reservation.key].status, 'cancelled');
+  assert.equal(f.data[reservation.key].clickPending, false);
+  assert.equal(f.worker.stats(f.data).pending, 0);
+  assert.equal(f.worker.stats(f.data).sent, 0);
+  assert.ok(await native.reserveDelivery('cancel-reserved', 2));
+});
+
+test('only the same tab document on the same Beijing day can mark or cancel its committed preparation', async () => {
+  const f = fixture();
+  const reservation = (await f.handle('quota.reserve', { jobId: 'owned-preparation', limit: 2 })).value;
+  await f.handle('quota.commit', { reservation, limit: 2 });
+  const original = clone(f.data[reservation.key]);
+  for (const from of [sender(2), { ...sender(), documentId: 'reloaded-document' },
+    { id: 'native-fixture', url: 'chrome-extension://native-fixture/popup.html' }]) {
+    for (const action of ['quota.markClicked', 'quota.cancelUnclicked']) {
+      const result = await f.handle(action, { reservation: { ...reservation, owner: 'forged', clickPending: true } }, from);
+      assert.equal(result.ok, true);
+      assert.equal(result.value, false);
+      assert.deepEqual(f.data[reservation.key], original);
+    }
+  }
+  f.time = Date.parse('2026-11-10T16:00:00Z');
+  for (const action of ['quota.markClicked', 'quota.cancelUnclicked']) {
+    assert.equal((await f.handle(action, { reservation })).value, false);
+    assert.deepEqual(f.data[reservation.key], original);
+  }
+});
+
+test('legacy dispatched records and already marked attempts cannot be cancelled through forged pending metadata', async () => {
+  for (const metadata of [{}, { clickPending: false, clickedAt: FIXED_TIME }]) {
+    const f = fixture();
+    const reservation = (await f.handle('quota.reserve', { jobId: 'existing-attempt', limit: 2 })).value;
+    f.data[reservation.key] = { ...f.data[reservation.key], status: 'dispatched', ...metadata };
+    const original = clone(f.data[reservation.key]);
+    for (const action of ['quota.markClicked', 'quota.cancelUnclicked']) {
+      assert.equal((await f.handle(action, { reservation: { ...reservation, clickPending: true } })).value, false);
+      assert.deepEqual(f.data[reservation.key], original);
+    }
+    assert.equal(f.worker.stats(f.data).sent, 1);
+    assert.equal((await f.handle('quota.reserve', { jobId: 'existing-attempt', limit: 2 })).value, false);
+  }
+});
+
+test('failed or silently ignored click markers and cancellations keep committed quota occupied', async () => {
+  for (const mode of ['failSet', 'silentSet']) {
+    for (const method of ['markDeliveryClicked', 'cancelUnclickedDelivery']) {
+      const f = fixture(), native = f.platform(); await native.ready;
+      const reservation = await native.reserveDelivery('storage-failure', 2);
+      await native.commitDelivery(reservation, 2);
+      f[mode] = true;
+      await assert.rejects(native[method](reservation));
+      assert.equal(f.data[reservation.key].status, 'dispatched');
+      assert.equal(f.data[reservation.key].clickPending, true);
+      assert.equal(f.worker.stats(f.data).sent, 1);
+      assert.equal(native.healthy, false);
+      f[mode] = false;
+      assert.equal((await f.handle('quota.reserve', { jobId: 'storage-failure', limit: 2 })).value, false);
+    }
+  }
+});
+
+test('a queued cancellation cannot undo a click marker committed immediately before it', async () => {
+  const f = fixture();
+  const reservation = (await f.handle('quota.reserve', { jobId: 'serial-activation', limit: 2 })).value;
+  await f.handle('quota.commit', { reservation, limit: 2 });
+  const [marked, cancelled] = await Promise.all([
+    f.handle('quota.markClicked', { reservation }),
+    f.handle('quota.cancelUnclicked', { reservation }),
+  ]);
+  assert.equal(marked.value, true);
+  assert.equal(cancelled.value, false);
+  assert.equal(f.data[reservation.key].clickPending, false);
+  assert.equal(f.worker.stats(f.data).sent, 1);
+});
+
 test('generic writes cannot overwrite quota journals or lower already consumed base counts', async () => {
   const f = fixture({ values: { [STATS]: { schema: 22, date: '2026-11-10', sent: 5, aiCalls: 8, processed: 10 } } });
   const protectedWrite = await f.handle('storage.set', { values: { [EVENT + '2026-11-10_forged']: { kind: 'sent', status: 'cancelled' } } });

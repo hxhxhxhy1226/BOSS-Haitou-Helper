@@ -250,12 +250,11 @@ test('testing an unsaved AI portrait uses the draft in the outgoing prompt witho
   assert.equal(f.BH.state.config.aiUserPortrait, '旧方向');
 });
 
-test('reducing the AI daily limit during a failing request prevents the next retry', async (t) => {
-  const f = await fixture(t, { ...primary, aiEnabled: true, aiDailyLimit: 100, aiMaxRetries: 1 }, {
-    fastTimers: true,
+test('daily limit reduced during a failed round blocks the next round', async (t) => {
+  const f = await fixture(t, { ...primary, aiEnabled: true, aiDailyLimit: 100, aiMaxRetries: 0 }, {
     request(win, request) {
       win.BH.applyConfig({ ...win.BH.state.config, aiDailyLimit: 0 });
-      setTimeout(() => request.onload({ status: 503, responseText: '{}' }), 0);
+      request.onload({ status: 503, responseText: '{}' });
       return { abort() {} };
     },
   });
@@ -263,7 +262,13 @@ test('reducing the AI daily limit during a failing request prevents the next ret
   const result = await f.BH.aiScreen({ title: '测试岗位', jobId: 'quota-fixture', jd: '负责设备控制软件开发。' });
   assert.equal(result.ok, false);
   assert.equal(f.requests.length, 1);
-  assert.match(result.err, /AI次数超限/);
+  assert.equal(result.apiUnavailable, true);
+  assert.match(result.err, /HTTP 503/);
+  const next = await f.BH.aiScreen({ title: '测试岗位', jobId: 'quota-next-round', jd: '负责设备控制软件开发。' });
+  assert.equal(next.ok, false);
+  assert.equal(next.quotaExceeded, true);
+  assert.match(next.err, /AI次数超限/);
+  assert.equal(f.requests.length, 1, '最新额度禁止下一轮新增网络请求');
 });
 
 const cards = '<ul class="job-list-wrapper"><li class="job-card-box" data-jobid="schedule-first"><a class="job-name" href="/job_detail/schedule-first.html">测试岗位</a></li></ul>';

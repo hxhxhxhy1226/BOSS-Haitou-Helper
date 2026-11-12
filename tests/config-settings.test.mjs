@@ -250,6 +250,83 @@ test('testing an unsaved AI portrait uses the draft in the outgoing prompt witho
   assert.equal(f.BH.state.config.aiUserPortrait, '旧方向');
 });
 
+// Synthetic candidate facts only: this portrait contains no real user's text.
+const LONG_CANDIDATE_PORTRAIT = [
+  '身份背景：普通工科应届候选人，下面的技能、项目和意向用于本地出站回归，所有经历均为合成测试资料。希望根据现有能力寻找可以承担实际开发任务的岗位。',
+  '已掌握技能：熟练使用 STM32 MCU、C 语言和 FreeRTOS，能够完成 GPIO、UART、SPI、I2C 外设驱动、任务调度、队列通信和基本中断处理；这些是已经掌握的 MCU/RTOS 技能。',
+  '实际项目：独立完成一个合成环境监测控制器，负责传感器接入、串口通信、数据采集、任务划分和日志定位；另有合成电机控制项目，使用 PWM 和状态机完成调速、异常停止与设备联调。',
+  '项目边界：以上项目运行于单片机和 FreeRTOS，能说明固件开发及嵌入式调试经验，但没有证明完成过工业 Linux 板级移植、内核裁剪或复杂高速总线驱动，不应从项目名称推导额外能力。',
+  '明确技能缺口：Linux 仅入门，能使用基本命令并理解进程概念；尚不熟悉 Linux 内核、设备树和 UBoot，没有 PCIe 驱动项目。岗位必须深入掌握这些技术时，应准确评估当前差距。',
+  '目标意向：希望以后从事汽车 ECU 或 AUTOSAR 方向，愿意在有培养安排的岗位中学习；ECU/AUTOSAR 是意向，并不代表已经掌握，也没有实际 ECU 或 AUTOSAR 开发经历。',
+  '未验证能力：未提及的专业技术不能自动补写为精通，也不能直接断言不会。请分别考虑已掌握的技能、可转移项目经验、明确缺口与岗位真正的核心必备要求。画像末尾完整性标记：合成候选人画像结束。',
+].join('\n');
+
+for (const customSystem of ['', '用户自定义输出要求：依据候选人事实与岗位核心职责，只返回 match、score、reason JSON。']) {
+  test(`长多行技能画像保存重载后完整发送主备接口（${customSystem ? '自定义' : '默认'}system）`, async (t) => {
+    assert.ok(LONG_CANDIDATE_PORTRAIT.length > 300, '画像超过本用例JD上限，不能误用JD截断逻辑');
+    const backup = { id: 'profile-backup', name: '画像回归备用', enabled: true,
+      baseUrl: 'https://profile-backup.example/v1/chat/completions', apiKey: 'synthetic-backup-key', model: 'synthetic-backup-model' };
+    const f = await fixture(t, { ...primary, aiCacheEnabled: false, aiEndpoints: [backup] });
+    await f.action('aiopen');
+    f.ai('aiEnabled').checked = true;
+    f.ai('aiUserPortrait').value = LONG_CANDIDATE_PORTRAIT;
+    f.ai('aiPromptTemplate').value = customSystem;
+    f.ai('aiMaxJDChars').value = '300';
+    f.ai('aiCacheEnabled').checked = false;
+    await f.action('aisave');
+    assert.equal(f.store.get(CONFIG).aiUserPortrait, LONG_CANDIDATE_PORTRAIT);
+    assert.equal(f.BH.state.config.aiUserPortrait, LONG_CANDIDATE_PORTRAIT);
+    await f.action('aiclose');
+    f.input('salaryMin').value = '10';
+    await f.action('save');
+    assert.equal(f.store.get(CONFIG).aiUserPortrait, LONG_CANDIDATE_PORTRAIT, '主面板保存不得覆盖画像');
+
+    const reload = await fixture(t, {}, { store: f.store,
+      request(win, request) {
+        queueMicrotask(() => request.onload({ status: request.url === primary.aiBaseUrl ? 503 : 200,
+          responseText: request.url === primary.aiBaseUrl ? '{"error":{"message":"synthetic primary unavailable"}}'
+            : JSON.stringify({ choices: [{ message: { content: '{"match":true,"score":90,"reason":"本地出站回归"}' } }] }),
+        }));
+        return { abort() {} };
+      },
+    });
+    await reload.action('aiopen');
+    assert.equal(reload.ai('aiUserPortrait').value, LONG_CANDIDATE_PORTRAIT);
+    assert.equal(reload.ai('aiPromptTemplate').value, customSystem);
+    await reload.action('aiclose');
+    const result = await reload.BH.aiScreen({ jobId: 'synthetic-long-portrait', title: 'MCU固件开发工程师',
+      company: '合成回归研发公司', salary: '15-20K',
+      jd: '负责 STM32 与 FreeRTOS 固件开发、传感器接入及设备通信联调。\n'.repeat(16) });
+    assert.equal(result.ok, true, result.err);
+    assert.equal(result.endpointId, backup.id);
+    assert.deepEqual(reload.requests.map((request) => request.url), [primary.aiBaseUrl, backup.baseUrl]);
+    const sentUsers = [];
+    for (const request of reload.requests) {
+      const messages = JSON.parse(request.data).messages;
+      const users = messages.filter((message) => message.role === 'user');
+      assert.equal(users.length, 1);
+      const user = users[0].content, system = messages.find((message) => message.role === 'system').content;
+      sentUsers.push(user);
+      assert.equal(user.split(LONG_CANDIDATE_PORTRAIT).length - 1, 1, '整段原画像必须恰好一次进入user消息');
+      assert.equal(user.slice(user.indexOf('【求职者画像】\n') + '【求职者画像】\n'.length,
+        user.indexOf('【求职者画像】\n') + '【求职者画像】\n'.length + LONG_CANDIDATE_PORTRAIT.length), LONG_CANDIDATE_PORTRAIT);
+      assert.ok(user.includes('熟练使用 STM32 MCU、C 语言和 FreeRTOS'));
+      assert.ok(user.includes('Linux 仅入门'));
+      assert.ok(user.includes('ECU/AUTOSAR 是意向，并不代表已经掌握'));
+      assert.ok(user.includes('画像末尾完整性标记：合成候选人画像结束。'));
+      assert.doesNotMatch(user, /^(?:[-*]\s*)?(?:候选人|求职者|我)?(?:已)?(?:精通Linux|精通ECU|精通AUTOSAR|熟练掌握PCIe)/m,
+        '程序不得追加与合成画像相反的熟练技能事实');
+      assert.match(system, /候选人画像与核心技能适配规则/);
+      assert.match(system, /身份背景.*已掌握技能.*项目.*目标或兴趣.*技能缺口/);
+      assert.match(system, /ECU[^\n]*AUTOSAR[^\n]*意向[^\n]*不能[^\n]*开发能力/);
+      assert.match(system, /未提及某技能不等于不会，也不等于已经会/);
+      if (customSystem) assert.ok(system.includes(customSystem), '自定义system仍须附能力适配规则');
+    }
+    assert.equal(sentUsers[0], sentUsers[1], '故障切换不能改变或缩短画像输入');
+    assert.deepEqual(reload.errors, []);
+  });
+}
+
 test('daily limit reduced during a failed round blocks the next round', async (t) => {
   const f = await fixture(t, { ...primary, aiEnabled: true, aiDailyLimit: 100, aiMaxRetries: 0 }, {
     request(win, request) {

@@ -1404,9 +1404,10 @@ section('27. 「只按明确事实判断」开关（v1.0.11）');
   ok('开：明确点名禁止「疑似 / 可能 / 风险高 / 流程不符」',
      /疑似/.test(pOn) && /风险高/.test(pOn) && /流程不符/.test(pOn));
   ok('开：禁止对公司招聘流程做外部推测', /不要对公司背景/.test(pOn));
-  ok('开：拿不准一律放行（判 true）', /拿不准\s*=\s*判\s*true/.test(pOn));
+  ok('开：核心技能缺口仍判断，未验证能力不默认满足', /核心技能明确缺口或未验证时不默认满足/.test(pOn) && !/拿不准\s*=\s*判\s*true/.test(pOn));
   ok('开：要求 reason 引用 JD 具体依据', /reason 必须引用/.test(pOn));
-  ok('SYSTEM_PROMPT 也写明禁止一切推测性拒绝', /禁止一切推测性拒绝/.test(BH.SYSTEM_PROMPT));
+  ok('SYSTEM_PROMPT 禁止风险推测但不覆盖有事实支持的核心技能不适配', /禁止公司背景、招聘流程等推测性风险拒绝/.test(BH.SYSTEM_PROMPT)
+    && /不能用它覆盖画像与 JD 有事实支持的核心技能不适配/.test(BH.SYSTEM_PROMPT));
 
   setCfg({ ...d1, aiEnabled: true, aiStrictFacts: false });
   const pOff = BH.buildAIPrompt({ title: '嵌入式开发', company: '华为', jd, jobId: 'F1' });
@@ -1719,7 +1720,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v117（旧切卡流程结论不得沿用）', /^v117\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v118（旧泛化嵌入式放行不得沿用）', /^v118\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2707,8 +2708,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v117（v116 及更早结论自动失效）',
-     /^v117\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v118（v117 及更早结论自动失效）',
+     /^v118\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 
@@ -2763,10 +2764,10 @@ section('49. 岗位方向匹配以实际职责和明确可选子方向为依据'
   // 49a. 大类校招有明确可选子方向时不能因并列招聘自动拒绝。
   ok('SYSTEM_PROMPT 维度 1 写明以画像技术栈与求职意向为核心依据',
      /核心依据/.test(BH.SYSTEM_PROMPT));
-  ok('SYSTEM_PROMPT 接受相关混合研发与明确可选校招子方向',
-     /MCU 与嵌入式 Linux\/RTOS 不互斥/.test(BH.SYSTEM_PROMPT) && /可选择匹配子方向的校招可以匹配/.test(BH.SYSTEM_PROMPT));
-  ok('SYSTEM_PROMPT 维度 1 以真实职责、任职要求和可选子方向判断',
-     /真实职责、任职要求及明确可选择的招聘子方向/.test(BH.SYSTEM_PROMPT));
+  ok('SYSTEM_PROMPT 混合岗位须有实际匹配工作或明确可选分支',
+     /MCU 与嵌入式 Linux\/RTOS 不互斥/.test(BH.SYSTEM_PROMPT) && /混合岗位须有实际匹配 MCU\/RTOS 工作或明确可选分支/.test(BH.SYSTEM_PROMPT));
+  ok('SYSTEM_PROMPT 维度 1 以真实职责、必备要求和可选子方向判断',
+     /真实职责、必备要求及明确可选择的招聘子方向/.test(BH.SYSTEM_PROMPT));
 
   // 49b. 画像非空：prompt 画像段带方向匹配规则
   resetAll();
@@ -2778,15 +2779,15 @@ section('49. 岗位方向匹配以实际职责和明确可选子方向为依据'
   const p = BH.buildAIPrompt(hwJob);
   ok('画像段写明方向匹配以画像技术栈与求职意向为核心依据',
      /判断岗位方向是否匹配，以上方画像的技术栈与求职意向为\*{0,2}核心依据/.test(p));
-  ok('画像段不再把混合技术或可选MCU校招方向一律排除',
-     /混合研发或可选择 MCU\/RTOS 子方向的校招可以匹配/.test(p) && !/并列列出、顺带提及.*不构成方向匹配/.test(p));
-  ok('画像段仍拒完全无关且没有匹配内容的职位，背景孤立关键词不算匹配',
-     /完全无关且没有匹配职责或可选方向/.test(p) && /公司介绍或福利中的孤立关键词不算匹配/.test(p));
+  ok('画像段允许实际匹配的MCU工作或可选分支，技术关键词不自动等价MCU',
+     /混合岗位须有实际 MCU\/RTOS 工作或明确可选分支并与画像能力相符/.test(p) && /不能把 ARM\/SoC\/BSP\/UBoot 等词等同于有 MCU 工作/.test(p));
+  ok('画像段也允许拒绝纯深入Linux核心适配不足，而不是只有完全无关才拒',
+     /纯深入 Linux 内核\/PCIe 等必备核心缺乏画像能力证据/.test(p) && !/完全无关.*才/.test(p));
   ok('画像原文完整送入 prompt', p.includes('寻找与 MCU 嵌入式软件开发岗位'));
 
   // 49c. 方向不符也须由当前岗位明确事实支撑，不能推测技术栈互斥。
-  ok('只认事实模式不允许推测MCU与Linux互斥后拒绝',
-     /方向不符也必须有当前职责的明确证据/.test(p) && /不能推测 MCU 与 Linux\/RTOS 互斥/.test(p));
+  ok('只认事实模式比较实际能力，互斥不是拒绝依据、纯Linux也不默认匹配',
+     /方向与技术适配都须以实际职责及画像为依据/.test(p) && /不代表纯深入 Linux 工作自动匹配/.test(p));
 
   // 49d. 画像为空：不强加方向规则，保留原保守文案
   setCfg({ ...cfg, aiUserPortrait: '' });
@@ -2857,11 +2858,11 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   const user = sent.find((message) => message.role === 'user').content;
   ok('截图完整职责送入模型，Linux与可选MCU/RTOS均保留',
      user.includes(mixedJob.jd) && user.includes('MCU/RTOS') && user.includes('BSP、设备驱动'));
-  ok('截图请求明确禁止主体偏Linux/系统驱动作为独立拒绝理由',
-     system.includes('不得仅因 Linux 描述更多、主体偏系统驱动或不是纯 MCU 而拒绝'));
+  ok('截图请求不因Linux字样独立拒绝，但MCU匹配须有实际工作',
+     system.includes('Linux 字样本身不是拒绝依据') && system.includes('当前确有 MCU/RTOS 实际研发职责'));
   ok('截图请求明确按入职可选MCU/RTOS方向评估',
-     system.includes('校招明确允许入职后重点向 MCU/RTOS 等匹配子方向发展时，应按该可选方向评估'));
-  ok('真实模型返回通过时保留该结论，不由提示层再拒绝',
+     system.includes('校招明确允许选择 MCU/RTOS 分支、提供培养或主要要求可迁移基础能力时，按该具体安排评估'));
+  ok('模型返回通过时保留该结论，不由提示层再拒绝',
      screened.ok && screened.match && screened.reason === '嵌入式研发且可选择MCU/RTOS方向');
 
   resetAll(); setCfg({ ...cfg, aiPromptTemplate: '自定义模板：根据岗位方向判断，输出JSON。' });
@@ -2883,7 +2884,7 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   const excluded = await BH.aiScreen(excludedJob);
   ok('明确不投Linux画像完整送达，混合规则仍要求尊重用户限定',
      sent[1].content.includes('只做裸机/MCU，不投 Linux。')
-     && sent[0].content.includes('当前岗位明确要求必须承担被排除方向的工作时按该条件拒绝'));
+     && sent[0].content.includes('混合技术描述不能覆盖明确排斥'));
   ok('明确排斥后的真实AI拒绝结论仍生效', excluded.ok && excluded.match === false);
 
   resetAll(); setCfg(cfg);
@@ -2894,7 +2895,7 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   const unrelated = await BH.aiScreen({ ...mixedJob, title: '前端开发工程师', jobId: 'UNRELATED_COMPANY_BACKGROUND',
     jd: '公司业务包含MCU/RTOS智能硬件，福利有嵌入式技术培训。本岗位仅负责React网页开发、CSS页面和浏览器业务，不承担嵌入式开发，也无可选嵌入式方向。' });
   ok('公司业务/福利孤立关键词不能替代当前职位职责，仍保留明确无关拒绝',
-     sent[0].content.includes('只在公司业务介绍、福利、其他岗位或无关背景中出现关键词') && unrelated.ok && unrelated.match === false);
+     sent[0].content.includes('公司业务介绍、福利或其他岗位中的词不算当前可选职责') && unrelated.ok && unrelated.match === false);
 
   resetAll(); setCfg({ ...cfg, aiCacheEnabled: true });
   BH.setAICache(mixedJob.jobId, { match: false, reason: '旧版认为Linux主体不是MCU' }, mixedJob);
@@ -2906,6 +2907,101 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   const refreshed = await BH.aiScreen(mixedJob);
   ok('v114旧混合方向拒绝缓存作废，重新请求并使用当前AI结论',
      refreshed.ok && refreshed.match && !refreshed.cached && netCalls === 1);
+  resetAll();
+}
+
+// ============================================================
+section('51. 合成画像分层与核心能力适配，避免纯深入Linux误放行');
+{
+  // Deliberately synthetic profiles; no saved personal portrait is copied into this test.
+  const synthetic = '测试候选人是电子类新人；已掌握GD32的ADC、UART、DMA及中断编程，完成过GD32多路传感器采集板项目，练习过Zephyr线程与消息队列。目标是MCU/RTOS开发，汽车ECU和AUTOSAR方向也愿意了解。';
+  const limited = synthetic + 'Linux仅做过简单命令练习，未做过内核或PCIe开发。';
+  const linuxProfile = '合成候选人完成过Linux内核模块、设备树和PCIe DMA驱动项目，能独立调试UBoot启动与根文件系统，目标是Linux系统驱动开发。';
+  const deepLinux = '当前核心工作是ARM SoC平台的UBoot移植、Linux内核裁剪、设备树与根文件系统构建、PCIe DMA驱动开发；必须深入掌握Linux内核机制并能独立定位PCIe驱动问题。';
+  const cases = [
+    { id: 'UNVERIFIED_LINUX', portrait: synthetic, title: 'Linux内核与PCIe驱动工程师', jd: deepLinux,
+      match: false, reason: 'Linux内核和PCIe是必备核心，画像未验证这些能力' },
+    { id: 'EXPLICIT_LINUX_GAP', portrait: limited, title: 'Linux系统工程师', jd: deepLinux,
+      match: false, reason: '要求深入Linux和PCIe，画像仅有命令练习' },
+    { id: 'MCU_BRANCH_TRAINING', portrait: limited, title: 'MCU与Linux混合校招',
+      jd: '负责GD32传感器固件与RTOS任务开发，也有Linux系统方向；入职可选择MCU/RTOS分支，提供基础培养，MCU分支不强制承担Linux内核或PCIe开发。',
+      match: true, reason: '可选择MCU分支，采集板和RTOS练习与当前任务相关' },
+    { id: 'MCU_WITH_MANDATORY_LINUX', portrait: limited, title: 'MCU与Linux平台工程师',
+      jd: '负责MCU通信固件，且所有候选人必须独立承担深入Linux内核裁剪和PCIe DMA驱动开发，不提供方向选择或基础培养。',
+      match: false, reason: '虽有MCU职责，仍必须独立承担画像欠缺的Linux核心' },
+    { id: 'AUTOSAR_INTEREST_ONLY', portrait: synthetic, title: 'AUTOSAR平台工程师',
+      jd: '核心职责为AUTOSAR BSW配置、MCAL适配和ECU集成，必须有独立AUTOSAR开发能力；不提供基础培训。',
+      match: false, reason: 'AUTOSAR独立开发是必备，画像只是方向兴趣' },
+    { id: 'PROVEN_LINUX_SKILLS', portrait: linuxProfile, title: 'Linux内核与PCIe驱动工程师', jd: deepLinux,
+      match: true, reason: '画像有内核与PCIe DMA真实项目，符合核心工作' },
+    { id: 'OR_PLATFORM_REQUIREMENT', portrait: limited, title: '嵌入式平台校招',
+      jd: '负责MCU/RTOS数据采集固件，可按能力选择平台；任职要求为掌握GD32、Zephyr或Linux至少一种即可，不要求同时掌握全部平台。',
+      match: true, reason: '平台条件为至少一种，画像的GD32和Zephyr满足' },
+    { id: 'GENERAL_TRAINING_NOT_EXEMPTION', portrait: limited, title: 'Linux内核与PCIe驱动工程师',
+      jd: deepLinux + '公司福利包括定期培训、入职导师与新人带教，但本岗位要求入职即可独立承担上述核心工作。',
+      match: false, reason: '普通培训导师不能免除独立Linux内核和PCIe要求' },
+  ];
+  let deepCaseMessages;
+  for (const c of cases) {
+    resetAll();
+    setCfg(semanticCfg({ aiUserPortrait: c.portrait, aiCacheEnabled: false, mustHave: [], mustNot: [] }));
+    let messages;
+    netHandler = (o) => {
+      messages = JSON.parse(o.data).messages;
+      reply(o, { choices: [{ message: { content: JSON.stringify({ match: c.match, score: c.match ? 88 : 22, reason: c.reason }) } }] });
+    };
+    const result = await BH.aiScreen({ jobId: c.id, title: c.title, company: '合成测试公司', salary: '12-18K', jd: c.jd });
+    const system = messages[0].content, prompt = messages[1].content;
+    ok(c.id + '：完整合成画像和当前核心JD送达模型', prompt.includes(c.portrait) && prompt.includes(c.jd));
+    ok(c.id + '：画像分层与技能证据规则随请求发送',
+       system.includes('本次完整【求职者画像】是候选人事实的唯一来源')
+       && system.includes('身份背景、已掌握技能及熟练程度、实际项目与用到的技术、目标或兴趣、明确技能缺口、未提及或未验证能力'));
+    ok(c.id + '：模型返回的适配结论保持一致', result.ok && result.match === c.match && result.reason === c.reason);
+    if (c.id === 'UNVERIFIED_LINUX') deepCaseMessages = messages;
+  }
+  const rules = deepCaseMessages[0].content;
+  ok('未写Linux不推定不会或已经会，核心未验证不默认满足',
+     rules.includes('未提及某技能不等于不会，也不等于已经会') && rules.includes('不能把未验证的核心能力默认满足'));
+  ok('目标兴趣不提升为AUTOSAR/ECU开发能力',
+     rules.includes('意向不能写成有 ECU/AUTOSAR 开发能力'));
+  ok('ARM/SoC/BSP/UBoot不自动当作实际MCU工作',
+     rules.includes('ARM/SoC/BSP/UBoot、设备树、根文件系统和设备驱动等词不自动等价于有 MCU 工作'));
+  ok('混合MCU描述不能覆盖全员强制深Linux的核心缺口',
+     rules.includes('少量 MCU 职责不能覆盖明确核心技能缺口') && rules.includes('也不能将未验证的强制核心能力默认满足'));
+  ok('普通培训导师不是独立深入核心要求的无条件豁免',
+     rules.includes('普通员工培训福利、导师/带教安排不能无条件豁免'));
+  ok('至少一种或任选其一按OR条件而非全部必备',
+     rules.includes('“至少一种/任选其一/或”按可替代条件判断，掌握其中匹配项即可满足'));
+  ok('MCU仅为标签、加分项或公司业务不算实际职责',
+     rules.includes('MCU 仅出现于标签、加分项或公司业务时，不算当前实际职责'));
+  ok('取消仅完全无关才拒和拿不准全部放的覆盖',
+     !/只有当前岗位.*完全无关.*才/.test(rules) && !/拿不准\s*=\s*判\s*true/.test(deepCaseMessages[1].content));
+  ok('学历年限历史限制保留，技术能力和真实项目仍应比较',
+     deepCaseMessages[1].content.includes('此限制不禁止比较技术技能、熟练程度与真实项目内容'));
+
+  resetAll(); setCfg(semanticCfg({ aiUserPortrait: limited, aiPromptTemplate: '自定义模板：评估嵌入式工作，输出JSON。', aiCacheEnabled: false }));
+  let customMessages;
+  netHandler = (o) => {
+    customMessages = JSON.parse(o.data).messages;
+    reply(o, { choices: [{ message: { content: '{"match":false,"reason":"核心Linux技能证据不足"}' } }] });
+  };
+  await BH.aiScreen({ jobId: 'PROFILE_RULES_CUSTOM', title: 'Linux系统工程师', company: '合成测试公司', jd: deepLinux });
+  ok('自定义模板也包含候选人事实来源和核心适配规则',
+     customMessages[0].content.includes('自定义模板：')
+     && customMessages[0].content.includes('【候选人画像与核心技能适配规则')
+     && customMessages[1].content.includes(limited));
+
+  resetAll(); setCfg(semanticCfg({ aiUserPortrait: synthetic, aiCacheEnabled: true }));
+  const target = { jobId: 'OLD_LINUX_ACCEPT_CACHE', title: 'Linux系统工程师', company: '合成测试公司', jd: deepLinux };
+  BH.setAICache(target.jobId, { match: true, reason: '旧版把所有嵌入式岗位放行' }, target);
+  const stale = structuredClone(store.get('boss_helper_ai_cache_v1'));
+  stale[target.jobId].pf = stale[target.jobId].pf.replace(/^v\d+\|/, 'v117|');
+  store.set('boss_helper_ai_cache_v1', stale);
+  win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(stale));
+  netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":false,"reason":"画像未验证必备Linux内核和PCIe能力"}' } }] });
+  const current = await BH.aiScreen(target);
+  ok('v117旧纯Linux误通过缓存作废，重新请求后使用当前拒绝结论',
+     current.ok && !current.match && !current.cached && netCalls === 1);
   resetAll();
 }
 

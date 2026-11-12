@@ -32,15 +32,20 @@ function detail(job, text = JD) {
 }
 
 async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, primaryFails = false,
-  jobs = [JOB], onContact, onRequest, stopAfter = 1, settings = {} } = {}) {
+  jobs = [JOB], onContact, onRequest, onExpand, innerSelection = false, initialJob = null,
+  selectionDelegated = false, cardBodyRole = false, titleNewTab = false,
+  selectionPreventDefault = true, selectionStopPropagation = false,
+  snapshotWait = null, officialSuccess = false, stopAfter = 1, settings = {} } = {}) {
   const values = new Map();
-  const requests = [], errors = [];
+  const requests = [], errors = [], selectionDefaultStates = [];
   const html = `<ul class="job-list-wrapper">${jobs.map((job) => `<li class="job-card-box" data-jobid="${job.data}" data-fixture-id="${job.id}">
-    <a class="job-name" href="/job_detail/${job.id}.html">${job.title}</a><span class="job-salary">20-30K</span>
+    ${innerSelection ? '<div class="card-area"' + (cardBodyRole ? ' role="button"' : '') + '>' : ''}
+    <a class="job-name" ${titleNewTab ? 'target="_blank"' : ''} href="/job_detail/${job.id}.html">${job.title}</a><span class="job-salary">20-30K</span>
     <ul class="tag-list"><li>3-5年</li><li>本科</li><li>STM32开发</li></ul>
     <div class="job-info">负责产品固件开发。</div><a class="company-name" href="/gongsi/fixture.html">${job.company}</a>
-    <div class="job-card-footer"><span class="time">刚刚活跃</span></div></li>`).join('')}</ul>
-    <main id="detail-host">${detail(OLD, '负责旧型号设备维护与旧通信平台升级，完成既有产品问题排查。')}</main>`;
+    <div class="job-card-footer"><span class="time">刚刚活跃</span></div>${innerSelection ? '</div>' : ''}</li>`).join('')}</ul>
+    <main id="detail-host">${initialJob ? detail(initialJob, initialJob.jd || JD)
+      : detail(OLD, '负责旧型号设备维护与旧通信平台升级，完成既有产品问题排查。')}</main>`;
   const vc = new VirtualConsole();
   vc.on('jsdomError', (e) => errors.push(e.message));
   const dom = new JSDOM(`<!doctype html><html><head><style>body * { opacity: 1; }</style></head><body>${html}</body></html>`, {
@@ -80,25 +85,56 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
     ...settings,
   });
   let expands = 0, clicks = 0, countAtClick = 0;
-  for (const card of win.document.querySelectorAll('.job-card-box')) card.addEventListener('click', (e) => {
-    e.preventDefault(); expands++;
+  for (const card of win.document.querySelectorAll('.job-card-box')) {
+    if (initialJob?.id === card.dataset.fixtureId) card.classList.add('active');
+    const selectionTarget = selectionDelegated ? win.document.querySelector('.job-list-wrapper')
+      : innerSelection ? card.querySelector('.card-area') : card;
+    selectionTarget.addEventListener('click', (e) => {
+    if (!card.contains(e.target)) return;
+    if (selectionDelegated) {
+      selectionDefaultStates.push(e.defaultPrevented);
+      if (e.defaultPrevented) return; // Mimic a site delegated handler's navigation guard.
+    }
+    if (selectionPreventDefault) e.preventDefault();
+    if (selectionStopPropagation) e.stopPropagation();
+    expands++;
     const job = jobs.find((j) => j.id === card.dataset.fixtureId);
+    if (onExpand && onExpand(win, { job, expands }) === false) return;
+    win.document.querySelectorAll('.job-card-box.active').forEach((node) => node.classList.remove('active'));
+    card.classList.add('active');
     win.document.getElementById('detail-host').innerHTML = detail(job, job.jd || (job.id === JOB.id ? JD
       : '负责下一型号 STM32 控制器固件设计，使用 FreeRTOS 开发驱动模块，并维护设备通信协议及量产测试软件。'));
     win.document.querySelector('.op-btn-chat').addEventListener('click', (event) => {
       event.preventDefault(); clicks++; countAtClick = win.BH.loadStats().sent;
       if (onContact) onContact(win, { clicks, countAtClick, job });
+      if (officialSuccess) {
+        win.document.querySelector('.op-btn-chat').textContent = '继续沟通';
+        const dialog = win.document.createElement('section'); dialog.className = 'greet-dialog';
+        dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header>'
+          + '<footer><button class="default-btn cancel-btn">留在此页</button></footer>';
+        dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+        win.document.body.append(dialog);
+      }
       // Keep the mock operation on the same page and terminate immediately after observation.
       if (clicks >= stopAfter) win.BH.state.stopFlag = true;
+      if (officialSuccess) return;
       const stay = win.document.createElement('button');
       stay.className = 'default-btn cancel-btn'; stay.textContent = '留在此页';
       stay.addEventListener('click', () => stay.remove()); win.document.body.append(stay);
     });
-  });
-  win.eval(code);
+    });
+  }
+  let runtime = code;
+  if (snapshotWait != null) {
+    const call = 'waitForJobSnapshot(expected, { previous, selection })';
+    assert.ok(runtime.includes(call), 'The retry fixture must use the real snapshot wait call');
+    runtime = runtime.replace(call, 'waitForJobSnapshot(expected, { previous, selection, timeoutMs: '
+      + snapshotWait + ', stableMs: 50, pollMs: 10 })');
+  }
+  win.eval(runtime);
   await delay(0);
   t.after(() => { win.BH.state.stopFlag = true; win.close(); });
-  return { win, values, requests, errors, expandCount: () => expands, clickCount: () => clicks, countAtClick: () => countAtClick,
+  return { win, values, requests, errors, selectionDefaultStates, expandCount: () => expands, clickCount: () => clicks, countAtClick: () => countAtClick,
     logs: () => win.document.querySelector('.bh-log')?.textContent || '',
     // Start persists settings before marking the loop running; that pending save is not a stopped task.
     stopped: () => !win.BH.state.running && !win.BH.state._starting && !win.BH.state._loopActive,
@@ -108,6 +144,172 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
 async function waitUntil(condition, timeout = 15000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (condition()) return; await delay(25); }
+}
+
+test('三岗位仅内层card-area监听：默认A详情，A/B/C分别调用AI并正确推进', { timeout: 30000 }, async (t) => {
+  const jobs = [
+    { id: 'innerSelectionA', data: 'inner-a', title: 'MCU电机控制工程师A', company: '电机研发公司A',
+      jd: '岗位A负责STM32电机FOC固件开发和PWM控制，这是岗位A独有的职责。' },
+    { id: 'innerSelectionB', data: 'inner-b', title: 'RTOS通信软件工程师B', company: '通信研发公司B',
+      jd: '岗位B负责FreeRTOS通信协议栈和CAN总线模块，这是岗位B独有的职责。' },
+    { id: 'innerSelectionC', data: 'inner-c', title: '机器人嵌入式工程师C', company: '机器人研发公司C',
+      jd: '岗位C负责机器人IMU与传感器驱动及MCU调试，这是岗位C独有的职责。' },
+  ];
+  const observed = [], contacted = [];
+  const f = await fixture(t, { aiEnabled: true, innerSelection: true, initialJob: jobs[0], jobs, stopAfter: 3, officialSuccess: true,
+    settings: { aiCacheEnabled: true },
+    onRequest(win, request) {
+      const card = win.document.querySelector('.job-card-box.active');
+      const expected = win.BH.readJobCard(card);
+      const input = win.BH.jobFromSnapshot(win.BH.extractJobSnapshot(expected), expected);
+      observed.push({ selected: card.dataset.fixtureId, input, prompt: JSON.parse(request.data).messages[1].content });
+    },
+    onContact(win, { job }) {
+      contacted.push({ id: job.id, selected: win.document.querySelector('.job-card-box.active')?.dataset.fixtureId });
+    },
+  });
+  for (const card of f.win.document.querySelectorAll('.job-card-box')) {
+    assert.equal(f.win.BH.getJobCardClickTarget(card), card.querySelector('.card-area'));
+  }
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 26000);
+  assert.equal(f.clickCount(), 3, f.logs());
+  assert.equal(f.expandCount(), 3, f.logs());
+  assert.equal(f.requests.length, 3, '每个目标岗位均应执行一次AI');
+  assert.equal(f.win.BH.state.config.aiEnabled, true, '推进卡片不能关闭AI');
+  assert.deepEqual(observed.map((entry) => entry.selected), jobs.map((job) => job.id));
+  assert.deepEqual(contacted, jobs.map((job) => ({ id: job.id, selected: job.id })));
+  const cache = f.values.get('boss_helper_ai_cache_v1');
+  assert.deepEqual(Object.keys(cache).sort(), jobs.map((job) => job.id).sort(), 'AI缓存ID必须来自相应目标卡片');
+  for (const [i, job] of jobs.entries()) {
+    assert.equal(observed[i].input.jobId, job.id);
+    assert.equal(observed[i].input.title, job.title);
+    assert.equal(observed[i].input.jd, job.jd, '不能将上一岗位JD作为当前AI输入');
+    assert.ok(observed[i].prompt.includes('职位标题：' + job.title));
+    assert.ok(observed[i].prompt.includes(job.jd));
+    assert.equal(cache[job.id].jf, f.win.BH.aiJobFingerprint(observed[i].input));
+    const card = f.win.document.querySelector('[data-fixture-id="' + job.id + '"]');
+    assert.ok(card.querySelector('.bh-tag-pass'), f.logs());
+  }
+  assert.equal(f.win.document.querySelector('.job-card-box.active').dataset.fixtureId, jobs[2].id);
+  assert.equal(f.win.BH.loadStats().aiCalls, 3);
+  assert.equal(f.win.BH.loadStats().skipped, 0);
+});
+
+test('详情暂未就绪保持可重试，下一轮成功后才标记已处理', { timeout: 16000 }, async (t) => {
+  let retried = false;
+  const f = await fixture(t, { aiEnabled: true, innerSelection: true, snapshotWait: 250, officialSuccess: true,
+    onExpand(win, { expands }) {
+      if (expands === 1) return false;
+      const card = win.document.querySelector('.job-card-box');
+      retried = card.dataset.bhProcessed !== '1' && win.BH.getUnprocessedJobCards().includes(card)
+        && card.querySelector('.bh-tag')?.dataset.bhRetryable === '1';
+    },
+  });
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 13000);
+  assert.equal(f.expandCount(), 2, f.logs());
+  assert.equal(retried, true, '暂未就绪不能因为存在状态标签就被永久标为已处理');
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.clickCount(), 1, f.logs());
+  assert.equal(f.win.BH.loadStats().skipped, 0, '读取未就绪不是筛选拒绝');
+  assert.ok(f.win.document.querySelector('.bh-tag-pass'));
+});
+
+for (const innerSelection of [true, false]) {
+  test(`卡片${innerSelection ? 'role=button主体' : '新标签职位链接'}：祖先委托先收到未取消事件再正确选择`, { timeout: 16000 }, async (t) => {
+    const f = await fixture(t, { aiEnabled: true, innerSelection, selectionDelegated: true,
+      cardBodyRole: innerSelection, titleNewTab: !innerSelection, officialSuccess: true });
+    const card = f.win.document.querySelector('.job-card-box');
+    assert.equal(f.win.BH.getJobCardClickTarget(card), card.querySelector(innerSelection ? '.card-area' : '.job-name'));
+    f.start();
+    await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 13000);
+    assert.equal(f.expandCount(), 1, f.logs());
+    assert.deepEqual(f.selectionDefaultStates, [false], '不能在BOSS祖先选择监听前preventDefault');
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.clickCount(), 1, f.logs());
+    assert.equal(f.win.document.querySelector('.job-card-box.active')?.dataset.fixtureId, JOB.id);
+    assert.ok(f.win.document.querySelector('.bh-tag-pass'));
+    assert.deepEqual(f.errors, [], '职位选择不能触发原生新标签或页面导航');
+  });
+}
+
+test('站点选择监听stopPropagation后仍取消职位链接原生新标签导航', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, titleNewTab: true, officialSuccess: true,
+    selectionPreventDefault: false, selectionStopPropagation: true });
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 13000);
+  assert.equal(f.expandCount(), 1, f.logs());
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.clickCount(), 1, f.logs());
+  assert.ok(f.win.document.querySelector('.bh-tag-pass'));
+  assert.deepEqual(f.errors, [], '冒泡被站点停止时仍不能执行原生页面导航');
+});
+
+test('详情连续未就绪只进行三次有界重试，不请求AI或占用投递额度', { timeout: 18000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, innerSelection: true, snapshotWait: 100, onExpand: () => false });
+  f.start();
+  await waitUntil(() => f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1'
+    || /主循环异常/.test(f.logs()), 15000);
+  f.win.BH.stop('fixture completed');
+  assert.equal(f.expandCount(), 3, f.logs());
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.clickCount(), 0);
+  assert.equal(f.win.BH.loadStats().sent, 30);
+  assert.equal(f.win.BH.loadStats().skipped, 0);
+  assert.match(f.win.document.querySelector('.bh-tag-not-sent')?.textContent || '', /连续未就绪/);
+});
+
+for (const phase of ['request', 'retry-wait']) {
+  test(`AI${phase === 'request' ? '请求在途' : '一分钟等待'}切换岗位后重新读取，不再把旧JD交给下一API`, { timeout: 20000 }, async (t) => {
+    const jobs = [
+      { ...JOB, id: 'guardInputA', data: 'guard-a', title: '电机固件岗位A', jd: 'A独有职责：STM32电机控制固件与FOC算法调试。' },
+      { ...JOB, id: 'guardInputB', data: 'guard-b', title: '通信固件岗位B', jd: 'B独有职责：FreeRTOS通信协议与CAN控制模块开发。' },
+    ];
+    let changed = false;
+    const switchToB = (win) => {
+      changed = true;
+      win.document.querySelectorAll('.job-card-box.active').forEach((node) => node.classList.remove('active'));
+      win.document.querySelector('[data-fixture-id="guardInputB"]').classList.add('active');
+      win.document.getElementById('detail-host').innerHTML = detail(jobs[1], jobs[1].jd);
+    };
+    const f = await fixture(t, { aiEnabled: true, primaryFails: true, innerSelection: true, officialSuccess: true,
+      jobs, settings: { maxRounds: 1, aiCacheEnabled: false },
+      onRequest(win, request) {
+        const prompt = JSON.parse(request.data).messages[1].content;
+        if (prompt.includes(jobs[0].jd)) {
+          if (phase === 'request' && !changed) setTimeout(() => {
+            switchToB(win); request.onload({ status: 503, responseText: '{}' });
+          }, 0);
+          else queueMicrotask(() => request.onload({ status: 503, responseText: '{}' }));
+        } else queueMicrotask(() => request.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: {
+          content: '{"match":true,"score":92,"reason":"当前B岗位方向匹配"}',
+        } }] }) }));
+        return false;
+      },
+    });
+    f.start();
+    if (phase === 'retry-wait') {
+      await waitUntil(() => /一分钟后重试全部接口/.test(f.logs()), 10000);
+      assert.equal(f.requests.length, 2, f.logs());
+      switchToB(f.win);
+    }
+    await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 16000);
+    assert.equal(changed, true);
+    assert.equal(f.clickCount(), 1, f.logs());
+    const prompts = f.requests.map((request) => request.messages[1].content);
+    assert.equal(prompts.filter((prompt) => prompt.includes(jobs[0].jd)).length, phase === 'request' ? 1 : 2,
+      '输入切换之后不能再发送旧岗位JD');
+    assert.equal(prompts.filter((prompt) => prompt.includes(jobs[1].jd)).length, 1);
+    assert.ok(f.requests.at(-1).url.includes('primary.example'), '重读B后从主API开始');
+    const a = f.win.document.querySelector('[data-fixture-id="guardInputA"]');
+    const b = f.win.document.querySelector('[data-fixture-id="guardInputB"]');
+    assert.notEqual(a.dataset.bhProcessed, '1', '旧输入变化仍保留A等待重新读取');
+    assert.equal(a.querySelector('.bh-tag')?.dataset.bhRetryable, '1');
+    assert.ok(b.querySelector('.bh-tag-pass'), f.logs());
+    assert.equal(f.win.BH.loadStats().skipped, 0);
+    assert.equal(f.win.BH.loadStats().sent, 31);
+  });
 }
 
 test('截图MCU与Linux混合校招先调用AI，通过后离线关键词不能再次拦截', { timeout: 16000 }, async (t) => {

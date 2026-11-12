@@ -381,3 +381,129 @@ test('单接口失败每轮只试一次，不沿用秒级重试', async (t) => {
   assert.equal(result.retryDelayMs, 60000);
   assert.deepEqual(f.postURLs(), [PRIMARY]);
 });
+
+test('排队结束后岗位输入已变时不发送冻结旧 JD', async (t) => {
+  let held;
+  const f = await fixture(t, { gm: (o) => { held = o; } });
+  const first = f.BH.aiScreen(job('first-in-queue'));
+  await until(() => !!held, '第一份请求应占用串行锁');
+  let current = true;
+  const queued = f.BH.aiScreen(job('stale-queued-job'), { isCurrentInput: () => current });
+  current = false;
+  response(held, 200, good());
+  const [firstResult, staleResult] = await Promise.all([first, queued]);
+  assert.equal(firstResult.ok, true);
+  assert.equal(staleResult.inputChanged, true);
+  assert.equal(staleResult.ok, false);
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
+  assert.equal(f.BH.loadStats().aiCalls, 1, '过期的排队输入不领取请求额度');
+});
+
+test('领取请求额度期间岗位输入改变也不发送，已领取额度保守保留', async (t) => {
+  const f = await fixture(t);
+  let current = true;
+  const setValue = f.win.GM_setValue;
+  f.win.GM_setValue = (key, value) => {
+    setValue(key, value);
+    if (key.startsWith('boss_helper_daily_event_v22_') && value.kind === 'ai') current = false;
+  };
+  const result = await f.BH.aiScreen(job(), { isCurrentInput: () => current });
+  assert.equal(result.inputChanged, true);
+  assert.equal(result.ok, false);
+  assert.deepEqual(f.postURLs(), []);
+  assert.equal(f.BH.loadStats().aiCalls, 1);
+});
+
+test('首接口返回时岗位已改变则交回重读，不尝试备用也不记 API 连续失败', async (t) => {
+  let current = true;
+  const f = await fixture(t, { gm: (o) => { current = false; response(o, 503, {}); } });
+  f.BH.state._aiFailStreak = 0;
+  const gate = await f.BH.runAIGate(null, job(), { isCurrentInput: () => current });
+  assert.equal(gate.action, 'retry');
+  assert.equal(gate.inputChanged, true);
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
+  assert.equal(f.BH.state._aiFailStreak, 0);
+});
+
+test('记录首接口故障后岗位改变，备用接口发送前再次核验输入', async (t) => {
+  const f = await fixture(t, { gm: (o) => response(o, 503, {}) });
+  let current = true;
+  const setValue = f.win.GM_setValue;
+  f.win.GM_setValue = (key, value) => {
+    setValue(key, value);
+    if (key === 'boss_helper_ai_health_v1') current = false;
+  };
+  const result = await f.BH.aiScreen(job(), { isCurrentInput: () => current });
+  assert.equal(result.inputChanged, true);
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
+  assert.equal(f.BH.loadStats().aiCalls, 1);
+});
+
+test('成功响应属于已变更输入时不缓存且不返回可投递结论', async (t) => {
+  let held, current = true;
+  const f = await fixture(t, { cfg: { aiCacheEnabled: true }, gm: (o) => { held = o; } });
+  const waiting = f.BH.runAIGate(null, job(), { isCurrentInput: () => current });
+  await until(() => !!held, '请求应已发出');
+  current = false;
+  response(held, 200, good());
+  const gate = await waiting;
+  assert.equal(gate.action, 'retry');
+  assert.equal(f.BH.getAICache(job().jobId), null);
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
+});
+
+test('一分钟重试等待中岗位输入改变及时交回重读，不重复发送旧 JD', async (t) => {
+  let current = true;
+  const f = await fixture(t, { gm: (o) => response(o, 503, {}) });
+  f.BH.state._aiFailStreak = 0;
+  const waiting = f.BH.runAIGate(null, job(), { isCurrentInput: () => current });
+  await until(() => f.BH.state._aiFailStreak === 1, '完整接口轮已失败并进入等待');
+  current = false;
+  const gate = await waiting;
+  assert.equal(gate.action, 'retry');
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
+  assert.equal(f.BH.state._aiFailStreak, 1, '输入变化不额外计入 API 失败');
+});
+
+test('领取额度后暂停时不调用输入 guard，恢复后同一岗位继续请求', async (t) => {
+  const f = await fixture(t);
+  let pausedDuringQuota = false, settled = false;
+  const setValue = f.win.GM_setValue;
+  f.win.GM_setValue = (key, value) => {
+    setValue(key, value);
+    if (!pausedDuringQuota && key.startsWith('boss_helper_daily_event_v22_') && value.kind === 'ai') {
+      pausedDuringQuota = true;
+      f.BH.state.paused = true;
+    }
+  };
+  const waiting = f.BH.runAIGate(null, job(), { isCurrentInput: () => {
+    assert.equal(f.BH.state.paused, false, '暂停不能被误判成岗位输入变化');
+    return true;
+  } }).then((gate) => { settled = true; return gate; });
+  await until(() => pausedDuringQuota, '领取额度应触发暂停');
+  await delay(350);
+  assert.equal(settled, false);
+  assert.deepEqual(f.postURLs(), []);
+  f.BH.state.paused = false;
+  const gate = await waiting;
+  assert.equal(gate.action, 'accept');
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
+});
+
+test('自动重试的人工暂停期间不读取 input guard，恢复同岗后正常继续', async (t) => {
+  const f = await fixture(t, { gm: (o) => response(o, 503, {}) });
+  const waiting = f.BH.runAIGate(null, job(), { isCurrentInput: () => {
+    assert.equal(f.BH.state.paused, false);
+    return true;
+  } });
+  await until(() => f.BH.state._aiFailStreak === 1, '应进入自动重试等待');
+  f.BH.state.paused = true;
+  f.time.now += 60001;
+  f.setGM((o) => response(o, 200, good()));
+  await delay(350);
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
+  f.BH.state.paused = false;
+  const gate = await waiting;
+  assert.equal(gate.action, 'accept');
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP, PRIMARY]);
+});

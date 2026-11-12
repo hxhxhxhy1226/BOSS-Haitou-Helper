@@ -332,6 +332,140 @@ test('标题先更新正文后更新时，必须等待新正文稳定', { timeou
   assert.ok(!snapshot.description.includes(OLD_JD));
 });
 
+test('点击前已变新标题/ID与选中态时，仍旧的正文不能重新确认或送入 AI', { timeout: 5000 }, async (t) => {
+  const f = await fixture(t, mountWithCard(detail(A, OLD_JD), B));
+  const confirmed = await f.BH.waitForJobSnapshot(A, { ...WAIT, requireChange: false });
+  assert.equal(confirmed.ok, true, confirmed.reason);
+  const root = f.doc.querySelector('.job-detail');
+  root.dataset.jobid = B.dataJobId;
+  root.querySelector('.job-banner').outerHTML = header(B);
+  f.doc.querySelector('.job-card-box').classList.add('active');
+  const expected = f.expected(), previous = f.BH.extractJobSnapshot(expected);
+  assert.equal(previous.ok, true, previous.reason);
+  assert.equal(previous.jobId, B.jobId);
+  assert.equal(previous.bodyPending, true, '新 metadata 不得把已确认的旧正文改归新岗位');
+  configureAuto(f);
+  const requests = mockAI(f, (o) => respondAI(o, false));
+  const selection = f.BH.beginJobSelection(expected, previous);
+  let finished = false;
+  const waiting = f.BH.waitForJobSnapshot(expected, { ...WAIT, previous, selection, timeoutMs: 3000 }).then(async (snapshot) => {
+    assert.equal(snapshot.ok, true, snapshot.reason);
+    await f.BH.aiScreen(f.BH.jobFromSnapshot(snapshot, expected));
+    finished = true;
+    return snapshot;
+  });
+  await delay(700);
+  assert.equal(finished, false, '旧正文稳定超过600ms也不能解除切换保护');
+  assert.equal(requests.length, 0);
+  root.querySelector('.job-sec-text').textContent = NEW_JD;
+  const snapshot = await waiting;
+  assert.equal(snapshot.bodyPending, false);
+  assert.equal(selection.cleaned, true);
+  const prompt = requests[0].messages.find((m) => m.role === 'user').content;
+  assert.ok(prompt.includes(NEW_JD));
+  assert.ok(!prompt.includes(OLD_JD));
+});
+
+for (const update of ['原正文内容重新渲染', '正文元素直接替换']) {
+  test('不同岗位合法使用相同描述时，有' + update + '依据即可继续', { timeout: 5000 }, async (t) => {
+    const f = await fixture(t, mountWithCard(detail(A, OLD_JD), B));
+    const previous = await f.BH.waitForJobSnapshot(A, { ...WAIT, requireChange: false });
+    const selection = f.BH.beginJobSelection(f.expected(), previous);
+    const root = f.doc.querySelector('.job-detail');
+    root.dataset.jobid = B.dataJobId;
+    root.querySelector('.job-banner').outerHTML = header(B);
+    let finished = false;
+    const waiting = f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, previous, selection, timeoutMs: 3000 }).then((snapshot) => {
+      finished = true; return snapshot;
+    });
+    await delay(100);
+    assert.equal(finished, false, '只更新页头不能证明正文属于新岗位');
+    const body = root.querySelector('.job-sec-text');
+    if (update === '原正文内容重新渲染') body.innerHTML = `<p>${OLD_JD}</p>`;
+    else body.replaceWith(body.cloneNode(true));
+    const snapshot = await waiting;
+    assert.equal(snapshot.ok, true, snapshot.reason);
+    assert.equal(snapshot.description, OLD_JD);
+    assert.equal(snapshot.jobId, B.jobId);
+    assert.ok(snapshot.bodyRevision > selection.bodyRevision);
+    assert.equal(selection.cleaned, true);
+  });
+}
+
+test('初次单个强 ID 快照需连续稳定复核，不能立即把未确认正文归给目标', { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, mountWithCard(detail(B, NEW_JD), B));
+  const previous = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(previous.bodyConfirmed, false);
+  const started = Date.now();
+  const snapshot = await f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, previous, timeoutMs: 1800 });
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.equal(snapshot.bodyConfirmed, true);
+  assert.ok(Date.now() - started >= 450, '一次strong ID采集不能代替稳定正文复核');
+});
+
+test('正文切换保护不被公司/技术标签/外层详情重建解除', { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, mountWithCard(detail(A, OLD_JD), B));
+  const previous = await f.BH.waitForJobSnapshot(A, { ...WAIT, requireChange: false });
+  const selection = f.BH.beginJobSelection(f.expected(), previous);
+  f.host().innerHTML = detail(B, OLD_JD);
+  const root = f.doc.querySelector('.job-detail');
+  root.querySelector('.job-tags').innerHTML = '<span>新岗位技术标签</span>';
+  root.querySelector('.company-name').textContent = B.company;
+  f.BH.extractJobSnapshot(f.expected()); // 在新详情内观察旧正文，随后只更新正文里的 UI。
+  root.querySelector('.job-sec-text').insertAdjacentHTML('beforeend', '<button>展开职位</button><span hidden>隐藏的辅助说明</span>');
+  const snapshot = await f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, previous, selection, timeoutMs: 280 });
+  assert.equal(snapshot.ok, false);
+  assert.equal(selection.cleaned, true);
+});
+
+test('无详情 ID 且标题公司相同时，选中卡片刚切换也不能复用上一岗位正文', { timeout: 4000 }, async (t) => {
+  const target = { ...B, title: A.title, company: A.company };
+  const f = await fixture(t, mountWithCard(withoutDOMJobId(detail(A, OLD_JD)), A));
+  f.doc.querySelector('.job-card-box').classList.add('active');
+  await f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, requireChange: false });
+  f.doc.querySelector('.job-list-wrapper').innerHTML = card(target);
+  f.doc.querySelector('.job-card-box').classList.add('active');
+  const previous = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(previous.bodyPending, true);
+  let finished = false;
+  const waiting = f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, previous, timeoutMs: 2500 }).then((result) => {
+    finished = true; return result;
+  });
+  await delay(150);
+  assert.equal(finished, false);
+  f.doc.querySelector('.job-sec-text').textContent = NEW_JD;
+  const result = await waiting;
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.description, NEW_JD);
+});
+
+test('新岗位页头配旧正文被拦截后，返回正文原来已确认的岗位可恢复', { timeout: 4000 }, async (t) => {
+  const f = await fixture(t, mountWithCard(detail(A, OLD_JD), A));
+  f.doc.querySelector('.job-card-box').classList.add('active');
+  const original = await f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, requireChange: false });
+  assert.equal(original.bodyConfirmed, true);
+  const root = f.doc.querySelector('.job-detail');
+  root.dataset.jobid = B.dataJobId;
+  root.querySelector('.job-banner').outerHTML = header(B);
+  f.doc.querySelector('.job-list-wrapper').innerHTML = card(B);
+  f.doc.querySelector('.job-card-box').classList.add('active');
+  const pending = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(pending.bodyPending, true);
+  assert.equal((await f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, previous: pending, timeoutMs: 150 })).ok, false,
+    'B的新metadata不能归属A旧正文');
+  root.dataset.jobid = A.dataJobId;
+  root.querySelector('.job-banner').outerHTML = header(A);
+  f.doc.querySelector('.job-list-wrapper').innerHTML = card(A);
+  f.doc.querySelector('.job-card-box').classList.add('active');
+  const restored = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(restored.bodyPending, false, '明确返回历史已确认的正文所属岗位应解除pending');
+  assert.equal(restored.bodyConfirmed, true);
+  const result = await f.BH.waitForJobSnapshot(f.expected(), { ...WAIT, previous: restored });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.jobId, A.jobId);
+  assert.equal(result.description, OLD_JD);
+});
+
 test('点击后仍显示上一职位时持续等待，目标出现后才开始稳定计时', { timeout: 5000 }, async (t) => {
   const f = await fixture(t, mountWithCard(detail(A, OLD_JD), B));
   const previous = f.BH.extractJobSnapshot();

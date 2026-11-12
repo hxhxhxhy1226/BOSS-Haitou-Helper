@@ -1719,7 +1719,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v115（旧混合方向误拒结论不得沿用）', /^v115\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v116（旧错位JD结论不得沿用）', /^v116\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2707,8 +2707,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v115（v114 及更早结论自动失效）',
-     /^v115\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v116（v115 及更早结论自动失效）',
+     /^v116\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 
@@ -2899,7 +2899,7 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   resetAll(); setCfg({ ...cfg, aiCacheEnabled: true });
   BH.setAICache(mixedJob.jobId, { match: false, reason: '旧版认为Linux主体不是MCU' }, mixedJob);
   const old = structuredClone(store.get('boss_helper_ai_cache_v1'));
-  old[mixedJob.jobId].pf = old[mixedJob.jobId].pf.replace(/^v115\|/, 'v114|');
+  old[mixedJob.jobId].pf = old[mixedJob.jobId].pf.replace(/^v\d+\|/, 'v114|');
   store.set('boss_helper_ai_cache_v1', old);
   win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(old));
   netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"reason":"可重点向MCU/RTOS发展"}' } }] });

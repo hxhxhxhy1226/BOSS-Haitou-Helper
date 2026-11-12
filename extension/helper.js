@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.5 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.6 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -751,6 +751,100 @@
     return outer.length === 1 ? readJobCard(outer[0]) : null;
   }
 
+  // 页头/选中态可能早于正文更新。保留正文最后观察到的所属岗位，不能用新 ID
+  // 把仍旧的正文立即重新命名为新岗位。仅正文区域自身的渲染才算同文案刷新依据。
+  let observedJobBody = null;
+  let confirmedJobBody = null;
+  let jobBodyChangeRevision = 0;
+  let jobBodyObserver = null;
+  const jobBodyRevisions = new WeakMap();
+
+  function recordJobBodyMutations(records) {
+    const snapshot = observedJobBody?.snapshot;
+    if (!snapshot?.root) return;
+    for (const record of records) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (!target || target.closest(JD_META_SEL + ', ' + JD_UI_SEL + ', ' + JD_RECOMMEND_SEL)) continue;
+      const bodies = snapshot.bodyNodes || [];
+      const hasBodyContent = (node) => {
+        const text = readScopedText(node, { bodyOnly: true }).trim();
+        return !!text && !JD_HEADING_RE.test(text.replace(/\s+/g, ''));
+      };
+      const contentChanged = record.type === 'characterData' || [...record.addedNodes, ...record.removedNodes].some(hasBodyContent);
+      if (!contentChanged) continue; // 展开按钮/隐藏装饰的变化不能替正文作证。
+      const insideBody = bodies.some((node) => node === target || node.contains?.(target));
+      const replacedBody = record.type === 'childList' && bodies.some((node) => [...record.removedNodes].includes(node))
+        && [...record.addedNodes].some(hasBodyContent);
+      // 换整张详情外壳或页头，不等于职位正文已从服务器更新。
+      if (!insideBody && !replacedBody) continue;
+      const revision = ++jobBodyChangeRevision;
+      for (let node = target; node && snapshot.root.contains(node); node = node.parentElement) jobBodyRevisions.set(node, revision);
+      if (replacedBody) for (const node of record.addedNodes) if (node.nodeType === 1) jobBodyRevisions.set(node, revision);
+    }
+  }
+
+  function flushJobBodyMutations() {
+    if (!jobBodyObserver) {
+      jobBodyObserver = new MutationObserver(recordJobBodyMutations);
+      jobBodyObserver.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    }
+    recordJobBodyMutations(jobBodyObserver.takeRecords());
+  }
+
+  function jobBodyRevision(snapshot) {
+    let revision = 0;
+    for (const body of snapshot.bodyNodes || []) {
+      for (let node = body.nodeType === 1 ? body : body.parentElement; node && snapshot.root?.contains(node); node = node.parentElement) {
+        revision = Math.max(revision, jobBodyRevisions.get(node) || 0);
+      }
+    }
+    return revision;
+  }
+
+  function observeJobBody(snapshot) {
+    flushJobBodyMutations();
+    if (!snapshot.ok || !snapshot.description) return snapshot;
+    const previous = observedJobBody;
+    const revision = jobBodyRevision(snapshot);
+    const selectedId = (item) => item.selectedJobId || item.selectedDataJobId || '';
+    const selectionChanged = previous && !snapshot.jobId && !snapshot.dataJobId
+      && selectedId(previous.snapshot) && selectedId(snapshot) && selectedId(previous.snapshot) !== selectedId(snapshot);
+    const stableOwner = confirmedJobBody && matchSnapshotIdentity(snapshot, confirmedJobBody).conflict ? confirmedJobBody : null;
+    const identityChanged = !!stableOwner || previous && (matchSnapshotIdentity(snapshot, previous.snapshot).conflict || selectionChanged);
+    const owner = previous?.pending ? previous.owner : stableOwner || previous?.snapshot;
+    const oldBody = owner?.description;
+    const ownerIdentity = owner ? matchSnapshotIdentity(snapshot, owner) : { ok: false, strength: 0 };
+    const ownerSelection = owner ? matchSnapshotIdentity(
+      { jobId: snapshot.selectedJobId, dataJobId: snapshot.selectedDataJobId },
+      { jobId: owner.selectedJobId, dataJobId: owner.selectedDataJobId }) : { ok: false, strength: 0 };
+    const returnedToOwner = previous?.pending && owner?.bodyConfirmed && snapshot.description === oldBody && ownerIdentity.ok
+      && (ownerIdentity.strength >= 3 || !owner.jobId && !owner.dataJobId && ownerIdentity.strength >= 2
+        && ownerSelection.ok && ownerSelection.strength >= 3);
+    const inheritedPending = previous?.pending && snapshot.description === oldBody;
+    const ownerRevision = previous?.pending ? previous.ownerRevision : owner?.bodyRevision ?? previous?.revision ?? 0;
+    const pending = !!(oldBody && snapshot.description === oldBody && (identityChanged || inheritedPending)
+      && !returnedToOwner && revision <= ownerRevision);
+    const stableSince = previous?.snapshot.fingerprint === snapshot.fingerprint && previous.pending === pending
+      ? previous.stableSince : Date.now();
+    snapshot.bodyRevision = revision;
+    snapshot.bodyPending = pending;
+    snapshot.bodyObservedSince = stableSince;
+    snapshot.bodyConfirmed = !pending && (returnedToOwner || Date.now() - stableSince >= 600
+      || previous?.snapshot.fingerprint === snapshot.fingerprint && previous.snapshot.bodyConfirmed);
+    if (pending) snapshot.previousBodySnapshot = owner;
+    observedJobBody = { snapshot: { ...snapshot }, revision, pending, stableSince,
+      owner: pending ? owner : snapshot, ownerRevision: pending ? ownerRevision : revision };
+    if (snapshot.bodyConfirmed) confirmedJobBody = { ...snapshot };
+    return snapshot;
+  }
+
+  function beginJobSelection(expected, previous = extractJobSnapshot()) {
+    flushJobBodyMutations();
+    // 短句柄不另建 observer；取消点击或等待结束时可清理引用。
+    return { previous, expected: { ...expected }, bodyRevision: jobBodyChangeRevision, startedAt: Date.now(),
+      cleanup() { this.cleaned = true; this.previous = null; this.expected = null; } };
+  }
+
   function discoverDetailRoots() {
     const found = new Set([...document.querySelectorAll(DETAIL_ROOT_SEL)].filter(detailElementAllowed));
     for (const el of document.querySelectorAll('.job-sec-text, .job-description, .job-desc, .describtion, h2, h3, h4')) {
@@ -855,9 +949,9 @@
       const best = matches[0];
       const ambiguous = matches.some((item) => item !== best && item.identityStrength === best.identityStrength
         && !best.root.contains(item.root) && !item.root.contains(best.root) && item.fingerprint !== best.fingerprint);
-      return ambiguous ? { ...best, ok: false, reason: '多个可见详情无法唯一对应目标岗位' } : best;
+      return observeJobBody(ambiguous ? { ...best, ok: false, reason: '多个可见详情无法唯一对应目标岗位' } : best);
     }
-    return candidates[0] ? { ...candidates[0], ok: false } : { ok: false, reason: '未找到可信的当前职位详情范围', root: null, description: '' };
+    return observeJobBody(candidates[0] ? { ...candidates[0], ok: false } : { ok: false, reason: '未找到可信的当前职位详情范围', root: null, description: '' });
   }
 
   function getDetailRoot() {
@@ -867,17 +961,20 @@
 
   async function waitForJobSnapshot(expected, options = {}) {
     expected = expected || {};
-    const { previous = null, requireChange = true } = options;
+    const { selection = null, requireChange = true } = options;
+    const capturedPrevious = options.previous || selection?.previous || null;
+    const previous = capturedPrevious?.previousBodySnapshot || capturedPrevious;
     const pollMs = Math.max(10, options.pollMs ?? 200);
     const stableMs = Math.max(0, options.stableMs ?? 600);
     let deadline = Date.now() + Math.max(pollMs, options.timeoutMs ?? 8000);
     const previousIdentity = previous ? matchSnapshotIdentity(previous, expected) : { ok: false, strength: 0 };
     const previouslySelected = previous && ((expected.jobId && previous.selectedJobId === expected.jobId)
       || (expected.dataJobId && previous.selectedDataJobId === expected.dataJobId));
-    const sameBeforeClick = previous?.ok && previousIdentity.ok && (previousIdentity.strength >= 3 || previouslySelected
-      || !expected.jobId && !expected.dataJobId && previousIdentity.strength >= 2);
+    const sameBeforeClick = previous?.ok && previous.bodyConfirmed && !capturedPrevious?.bodyPending && previousIdentity.ok
+      && (previousIdentity.strength >= 2 || previouslySelected);
     const needsNewBody = requireChange && !!previous?.description && !sameBeforeClick;
     let fingerprint = '', stableSince = 0, last = { ok: false, reason: '等待详情加载' };
+    try {
     while (Date.now() <= deadline) {
       if (state.stopFlag) return { ok: false, stopped: true, reason: '已停止读取详情' };
       if (state.paused) {
@@ -888,16 +985,25 @@
         continue;
       }
       last = extractJobSnapshot(expected);
-      if (!last.ok || needsNewBody && last.description === previous.description) {
+      const refreshedBody = last.bodyRevision > (selection?.bodyRevision ?? previous?.bodyRevision ?? 0);
+      const confirmedSameBody = last.bodyConfirmed && !capturedPrevious?.bodyPending && previousIdentity.ok
+        && (previousIdentity.strength >= 2 || previouslySelected);
+      if (!last.ok || last.bodyPending || needsNewBody && last.description === previous.description && !refreshedBody && !confirmedSameBody) {
         if (last.ok) last = { ...last, ok: false, reason: '标题已切换，职位正文尚未更新' };
         fingerprint = '';
       } else {
         if (fingerprint !== last.fingerprint) { fingerprint = last.fingerprint; stableSince = Date.now(); }
-        if (Date.now() - stableSince >= stableMs) return last;
+        if (Date.now() - stableSince >= stableMs) {
+          last.bodyConfirmed = true;
+          confirmedJobBody = { ...last };
+          if (observedJobBody?.snapshot.fingerprint === last.fingerprint) observedJobBody.snapshot.bodyConfirmed = true;
+          return last;
+        }
       }
       await sleep(pollMs);
     }
     return { ...last, ok: false, reason: last.ok ? '职位详情尚未稳定，请稍后重试' : last.reason };
+    } finally { selection?.cleanup(); }
   }
 
   // HR 的**实时**状态徽标。只精确匹配这几个词，避免把"在线沟通 / 随时在线"这类文案当成实时状态。
@@ -2029,7 +2135,29 @@
     }
   }
 
-  async function humanClick(el, stillValid, beforePointerDown) {
+  function getJobCardClickTarget(card) {
+    if (!card?.isConnected) return null;
+    const excluded = '.bh-tag, #boss-helper-panel, #bh-detail-modal, #bh-ai-modal, '
+      + '.company-name, .company-info, .op-btn-chat, .btn-startchat, '
+      + '.btn-send-message, [class*="collect"], [class*="favorite"], a[href*="/gongsi/"], a[href*="/chat/"]';
+    const usable = (node) => node && card.contains(node) && isVisible(node) && !node.closest(excluded);
+    // Site selection listeners live on the inner card body. Dispatching on the outer
+    // list item never reaches its descendants, even when the pointer is over them.
+    for (const selector of ['.card-area', '.job-card-body', '.job-card-content', '.job-card-info']) {
+      const nodes = [...(card.matches(selector) ? [card] : []), ...card.querySelectorAll(selector)];
+      const target = nodes.find(usable);
+      if (target) return target;
+    }
+    for (const selector of SEL.jobTitle) {
+      const nodes = [...(card.matches(selector) ? [card] : []), ...card.querySelectorAll(selector)];
+      const target = nodes.find(usable);
+      if (target) return target;
+    }
+    const link = [...card.querySelectorAll('a[href*="/job_detail/"]')].find(usable);
+    return link || (usable(card) ? card : null);
+  }
+
+  async function humanClick(el, stillValid, beforePointerDown, options = {}) {
     const allowed = () => !state.stopFlag && !state.paused && !!el?.isConnected && (!stillValid || stillValid());
     if (!allowed()) return false;
     scrollIntoViewSafe(el);
@@ -2050,7 +2178,25 @@
     await sleep(randInt(30, 100));
     if (!allowed()) return false;
     el.dispatchEvent(new MouseEvent('mouseup', o));
-    el.dispatchEvent(new MouseEvent('click', o));
+    // Cancel only the anchor's native navigation after the site's handlers have
+    // received the bubbled event. Card selection must not open a second tab.
+    const preventNavigation = (event) => {
+      if (event.target === el && !event.isTrusted && (event.cancelBubble || event.currentTarget === window)) event.preventDefault();
+    };
+    const navigationPath = [];
+    if (options.preventDefaultNavigation) {
+      for (let node = el; node; node = node.parentNode) navigationPath.push(node);
+      navigationPath.push(window);
+      // Observe each bubble stage without cancelling it early. If the site stops
+      // propagation, cancel navigation after its handler at that same stage.
+      for (const node of navigationPath) node.addEventListener('click', preventNavigation);
+    }
+    try { el.dispatchEvent(new MouseEvent('click', o)); }
+    finally {
+      if (options.preventDefaultNavigation) {
+        for (const node of navigationPath) node.removeEventListener('click', preventNavigation);
+      }
+    }
     return true;
   }
 
@@ -4559,17 +4705,28 @@
     return native && cfg._testGeneration !== undefined
       ? (state._startGeneration || 0) !== cfg._testGeneration : state.stopFlag;
   }
+  function aiInputChanged(isCurrentInput) {
+    if (state.paused || typeof isCurrentInput !== 'function') return false;
+    try { return !isCurrentInput(); } catch (_) { return true; }
+  }
+  function changedAIInputResult() {
+    return { ok: false, inputChanged: true, err: '当前岗位输入已变化，需重新读取' };
+  }
   async function reserveAIRequest(cfg, fingerprint) {
+    while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
     if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+    if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
     if (fingerprint && aiCacheFingerprint() !== fingerprint) {
       return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
     }
     const currentLimit = () => countValue(fingerprint ? getAIConfig().aiDailyLimit : cfg.aiDailyLimit);
     const quota = await consumeAIDailyQuota(currentLimit());
+    // 领取额度期间也可能按了停止；额度保守保留，但不继续发送。
+    while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
+    if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+    if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
     if (!quota) return { ok: false, quotaExceeded: true,
       err: !statsPersistenceAvailable() ? 'AI 计数无法持久化，已停止请求' : 'AI次数超限' };
-    // 领取额度期间也可能按了停止；额度保守保留，但不继续发送。
-    if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
     if (fingerprint && aiCacheFingerprint() !== fingerprint) {
       return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
     }
@@ -5301,7 +5458,7 @@
   // v1.1.5：允许嵌入式混合技术栈与明确可选校招方向，旧方向拒绝缓存作废。
   function aiCacheFingerprint(cfg) {
     cfg = cfg || getAIConfig();
-    return 'v115|' + stableAIHash({
+    return 'v116|' + stableAIHash({
       aiEnabled: cfg.aiEnabled === true,
       skipKeywordCheck: !!state.skipKeywordCheck,
       aiMaxJDChars: Number(cfg.aiMaxJDChars || 2500),
@@ -5381,6 +5538,9 @@
     _aiLock = new Promise((r) => { release = r; });
     await prev.catch(() => {});
     try {
+      while (typeof opts?.isCurrentInput === 'function' && state.paused && !state.stopFlag) await sleep(300);
+      if (typeof opts?.isCurrentInput === 'function' && state.stopFlag) return { ok: false, cancelled: true, err: '已停止' };
+      if (aiInputChanged(opts?.isCurrentInput)) return changedAIInputResult();
       return await aiScreenInner(job, opts);
     } finally {
       try { release(); } catch (_) {}
@@ -5390,6 +5550,7 @@
   async function aiScreenInner(job, opts) {
     const testingDraft = !!(opts?.bypassCache && opts?.config);
     const cfg = { ...(testingDraft ? opts.config : getAIConfig()) };
+    cfg._isCurrentInput = opts?.isCurrentInput;
     if (native && testingDraft) cfg._testGeneration = opts.testGeneration;
     const endpoints = getAIEndpoints(cfg).map((e) => Object.freeze({ ...e }));
     // 冻结本次实际送出的标量输入；调用方在等待期间修改原对象不会改写缓存的岗位指纹。
@@ -5446,12 +5607,18 @@
       if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
       while (!testingDraft && state.paused && !aiOperationStopped(cfg)) await sleep(300);
       if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+      if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
       if (!testingDraft && aiCacheFingerprint() !== requestFingerprint) {
         return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
       }
+      addLog(`🤖 准备调用 ${endpoint.name}：${title} | 职位ID ${jobId || '(未提供)'} | JD ${preparedJD.text.length} 字`, 'info',
+        [`职位：${title}`, `职位ID：${jobId || '(未提供)'}`, `AI 接口：${endpoint.name}`,
+          '--- 本次送入 AI 的职位正文 ---', preparedJD.text].join('\n'));
       const r = await callLLM(messages, opts?.transport, endpointConfig(cfg, endpoint), testingDraft ? null : requestFingerprint, candidates.length > 1);
+      while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
       if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
-      if (r.quotaExceeded || r.cancelled || r.policyChanged) return r;
+      if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
+      if (r.quotaExceeded || r.cancelled || r.policyChanged || r.inputChanged) return r;
       if (r.ok) {
         const p = parseAIResult(r.text);
         if (p.ok) {
@@ -5772,7 +5939,10 @@
         if (!key || state._processedJobs.has(key) || !card.isConnected) continue;
         const processed = await processOne(card);
         if (jobCardKey(card) !== key) { clearJobCardMarker(card); continue; }
-        if (processed) markJobCardProcessed(card, key);
+        if (processed) {
+          state._jobReadRetries.delete(key);
+          markJobCardProcessed(card, key);
+        }
         else if (!state.stopFlag && !state.paused) {
           const retries = (state._jobReadRetries.get(key) || 0) + 1;
           state._jobReadRetries.set(key, retries);
@@ -5835,7 +6005,7 @@
   }
 
   // 接口暂时不可用时保留当前岗位，每分钟重新巡检，暂停/停止/修改配置即时生效。
-  async function waitForAIRetry(card, job, fingerprint, retryAt) {
+  async function waitForAIRetry(card, job, fingerprint, retryAt, isCurrentInput) {
     const countdown = panel?.querySelector('.bh-cd');
     const requestLimit = countValue(getAIConfig().aiDailyLimit);
     try {
@@ -5846,6 +6016,7 @@
           return false;
         }
         if (!state.paused) {
+          if (aiInputChanged(isCurrentInput)) return 'input-changed';
           if (aiCacheFingerprint() !== fingerprint || countValue(getAIConfig().aiDailyLimit) !== requestLimit
               || Date.now() >= retryAt) return true;
           const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
@@ -5861,11 +6032,13 @@
   }
 
   /** AI 优先；完整接口暂时不可用时持续重试，未配置或关闭 AI 时复核全部本地条件。 */
-  async function runAIGate(card, job) {
+  async function runAIGate(card, job, options = {}) {
+    const retryInput = () => ({ action: 'retry', inputChanged: true, reason: changedAIInputResult().err });
     while (true) {
       if (state.stopFlag) return { action: 'stop' };
       while (state.paused && !state.stopFlag) await sleep(300);
       if (state.stopFlag) return { action: 'stop' };
+      if (aiInputChanged(options.isCurrentInput)) return retryInput();
       if (!getAIConfig().aiEnabled) {
         const cfg = getAIConfig();
         const local = matchJob(jobMatchText(job), job.activeText, job.salary, cfg, {}, job);
@@ -5875,10 +6048,11 @@
       }
 
       const requestedPolicy = aiCacheFingerprint();
-      const ai = await aiScreen(job);
+      const ai = await aiScreen(job, { isCurrentInput: options.isCurrentInput });
       // 用户暂停时请求可能仍返回；保留结论和岗位，恢复后再校验规则并消费结果。
       while (state.paused && !state.stopFlag) await sleep(300);
       if (state.stopFlag) return { action: 'stop' };
+      if (ai.inputChanged || aiInputChanged(options.isCurrentInput)) return retryInput();
       if (ai.policyChanged || aiCacheFingerprint() !== requestedPolicy) {
         addLog('筛选规则已变化，重新判断该职位：' + (job.title || ''));
         continue;
@@ -5929,7 +6103,9 @@
 
       addLog(`⏳ ${ai.quotaExceeded ? 'AI 请求额度不可用' : '全部 AI 接口不可用'}（${ai.err}），保留当前岗位，一分钟后重试全部接口：${job.title || ''}`, 'err');
       const retryAt = ai.retryAt || Date.now() + 60000;
-      if (!await waitForAIRetry(card, job, aiCacheFingerprint(cfg), retryAt)) return { action: 'stop' };
+      const retryState = await waitForAIRetry(card, job, aiCacheFingerprint(cfg), retryAt, options.isCurrentInput);
+      if (retryState === 'input-changed') return retryInput();
+      if (!retryState) return { action: 'stop' };
       addLog('▶ 重新判断当前职位：' + (job.title || ''));
     }
   }
@@ -5977,7 +6153,7 @@
   function snapshotStillCurrent(snapshot, expected, expectedJob, card) {
     if (state.stopFlag || state.paused) return false;
     const current = extractJobSnapshot(expected);
-    if (!current.ok || current.fingerprint !== snapshot.fingerprint) return false;
+    if (!current.ok || current.bodyPending || current.fingerprint !== snapshot.fingerprint) return false;
     const selected = selectedCardIdentity();
     if (selected && expected && matchSnapshotIdentity(selected, expected).conflict) return false;
     if (expectedJob) {
@@ -6305,7 +6481,10 @@
     try {
       await processOneInner(card);
       const tag = card.querySelector('.bh-tag');
-      return !!tag && !tag.classList.contains('bh-tag-ai-pass');
+      if (!tag || tag.dataset.bhRetryable === '1') return false;
+      // A label used while reading/waiting is not a completed screening outcome.
+      return ['pass', 'skip', 'ai-skip', 'matched', 'info', 'not-sent', 'pending']
+        .some((kind) => tag.classList.contains('bh-tag-' + kind));
     }
     catch (error) { if (card?.isConnected) tagCard(card, 'not-sent', '处理异常：' + (error?.message || error)); throw error; }
     finally { state._jobProcessing = false; if (card) delete card.dataset.bhProcessing; }
@@ -6345,16 +6524,32 @@
     }
     addLog(`→ 展开详情：${title} | 公司="${company}" | 职位ID="${expected.jobId || expected.dataJobId}"`);
     let previous = extractJobSnapshot();
-    const clicked = await humanClick(card, () => !state.stopFlag && cardStillMatches(card, expected),
-      () => { previous = extractJobSnapshot(); });
-    if (!clicked) return;
+    let selection = null;
+    const clickTarget = getJobCardClickTarget(card);
+    if (!clickTarget) {
+      tagCard(card, 'pending', '未找到当前卡片的可点击主体，稍后重试');
+      card.querySelector('.bh-tag').dataset.bhRetryable = '1';
+      return;
+    }
+    let clicked;
+    try {
+      clicked = await humanClick(clickTarget, () => !state.stopFlag && cardStillMatches(card, expected)
+        && getJobCardClickTarget(card) === clickTarget,
+        () => { previous = extractJobSnapshot(); selection = beginJobSelection(expected, previous); },
+        { preventDefaultNavigation: true });
+    } catch (error) { selection?.cleanup(); throw error; }
+    if (!clicked) { selection?.cleanup(); return; }
 
-    const snapshot = await waitForJobSnapshot(expected, { previous });
+    let snapshot;
+    try { snapshot = await waitForJobSnapshot(expected, { previous, selection }); }
+    finally { selection?.cleanup(); }
     if (!snapshot.ok) {
       if (!snapshot.stopped) {
-        if (card.isConnected && cardStillMatches(card, expected)) tagCard(card, 'skip', snapshot.reason);
+        if (card.isConnected && cardStillMatches(card, expected)) {
+          tagCard(card, 'pending', '详情尚未就绪，将重试：' + snapshot.reason);
+          card.querySelector('.bh-tag').dataset.bhRetryable = '1';
+        }
         addLog(`✗ ${title} | 详情读取未确认：${snapshot.reason}`, 'skip', snapshotDiagnostic(snapshot));
-        const stats = loadStats(); stats.skipped++; saveStats(stats); refreshStats();
       }
       return;
     }
@@ -6415,8 +6610,16 @@
 
     // ===== AI 语义判断：包括排除词；本地仅先检查活跃度 =====
     if (state.config.aiEnabled) {
-      const gate = await runAIGate(card, job);
+      const gate = await runAIGate(card, job, {
+        isCurrentInput: () => cardStillMatches(card, expected) && snapshotStillCurrent(snapshot, expected, job, card),
+      });
       if (gate.action === 'stop') { notSent('已停止，未执行沟通'); return; }
+      if (gate.action === 'retry') {
+        tagCard(card, 'pending', gate.reason || '当前岗位输入已变化，将重新读取');
+        card.querySelector('.bh-tag').dataset.bhRetryable = '1';
+        addLog(`⏳ ${title} | 当前岗位输入已变化，将重新读取`, 'info');
+        return;
+      }
       if (!cardStillMatches(card, expected) || !snapshotStillCurrent(snapshot, expected, job, card)) {
         notSent('判断期间岗位内容已改变，未执行沟通');
         return;
@@ -6621,8 +6824,15 @@
     }
 
     if (cfg.aiEnabled) {
-      const gate = await runAIGate(null, job);
+      const gate = await runAIGate(null, job, {
+        isCurrentInput: () => isDetailPage() && publicJobId(location.href) === expected.jobId
+          && snapshotStillCurrent(snapshot, expected, job),
+      });
       if (gate.action === 'stop') return 'skipped';
+      if (gate.action === 'retry') {
+        addLog('详情页输入已变化，将等待重新读取：' + job.title, 'info');
+        return false;
+      }
       if (gate.action !== 'accept') {
         addLog('✗ ' + job.title + ' | ' + (gate.reason || 'AI 未通过'), 'skip',
           buildAISkipDetail({ ...job, sal: job.salary, gate }));
@@ -6861,10 +7071,10 @@
       // v1.0.14：活跃度解析暴露给测试 —— 排查"在线却被判 N 天前"这类误判要用它
       parseActiveDays, parseSalaryK,
       readScopedText, isReadableElement, extractDescription, collectJobDescriptionText, collectText,
-      readJobCard, extractJobSnapshot, waitForJobSnapshot, getDetailRoot, matchSnapshotIdentity,
+      readJobCard, extractJobSnapshot, waitForJobSnapshot, beginJobSelection, getDetailRoot, matchSnapshotIdentity,
       collectJobCards, jobCardKey, getUnprocessedJobCards, markJobCardProcessed, findScrollContainer, scrollToBottom, loadMore,
       collectActiveText, collectLiveBadges, publicJobId,
-      jobFromSnapshot, jobMatchText, snapshotDiagnostic, snapshotStillCurrent, snapshotChatButton, humanClick, autoChatOnDetail,
+      jobFromSnapshot, jobMatchText, snapshotDiagnostic, snapshotStillCurrent, snapshotChatButton, getJobCardClickTarget, humanClick, autoChatOnDetail,
       // v1.0.15：HR 实时状态徽标的识别（只认逐字精确的那几个词）
       isLiveBadge,
       aiScreen, callLLM, buildAIPrompt, parseAIResult, cleanJDText, prepareAIJDText,

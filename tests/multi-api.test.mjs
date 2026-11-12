@@ -101,7 +101,7 @@ for (const failure of [
     const next = await f.BH.aiScreen(job('next-job'));
     assert.equal(next.ok, true);
     assert.equal(f.postURLs().at(-1), BACKUP);
-    assert.equal(f.postURLs().filter((url) => url === PRIMARY).length, 1, '后续岗位优先使用已成功 API');
+    assert.equal(f.postURLs().filter((url) => url === PRIMARY).length, 2, '后续岗位仍从用户设置的第一项开始');
   });
 }
 
@@ -116,40 +116,43 @@ test('首个备用也失败时继续调用下一项，禁用项绝不尝试', as
   assert.equal(f.BH.loadStats().aiCalls, 3);
 });
 
-test('所有服务失败返回失败，skip 降级不会假造匹配结论', async (t) => {
+test('所有服务失败返回一分钟后的重试时间，不假造匹配结论', async (t) => {
   const f = await fixture(t, { gm: (o) => response(o, 401, { error: { message: 'invalid key' } }) });
   const screen = await f.BH.aiScreen(job());
   assert.equal(screen.ok, false);
   assert.notEqual(screen.match, true);
-  const gate = await f.BH.runAIGate(null, job('gate-failure'));
-  assert.equal(gate.action, 'skip');
-  assert.equal(f.postURLs().length, 2, '冷却中的失效 API 不应每个岗位反复请求');
+  assert.equal(screen.apiUnavailable, true);
+  assert.equal(screen.retryAt, f.time.now + 60000);
+  assert.equal(screen.retryDelayMs, 60000);
+  assert.equal(f.postURLs().length, 2);
   assert.equal(f.BH.loadStats().aiCalls, 2);
 });
 
-test('失效状态跨刷新保存，冷却后可恢复尝试', async (t) => {
+test('失效诊断跨刷新保存，单轮巡检不漏掉任何启用接口', async (t) => {
   const store = new Map();
   const clock = { now: Date.parse('2026-11-10T04:00:00Z') };
   const f = await fixture(t, { store, clock, gm: (o) => response(o, 503, {}) });
   assert.equal((await f.BH.aiScreen(job())).ok, false);
   const health = f.BH.getAIEndpointHealth(f.BH.state.config);
   const retryAt = Math.max(...health.map((h) => h.retryAt || 0));
-  assert.ok(retryAt > clock.now, '失败服务有有限冷却期');
+  assert.equal(retryAt, clock.now + 60000, '所有接口失败统一显示一分钟后重试');
   const refresh = await fixture(t, { store, clock });
-  assert.equal((await refresh.BH.aiScreen(job('refresh-before-retry'))).ok, false);
-  assert.equal(refresh.postURLs().length, 0, '刷新不能绕开冷却期');
+  const refreshedHealth = refresh.BH.getAIEndpointHealth(refresh.BH.state.config);
+  assert.ok(refreshedHealth.every((h) => h.status === 'cooldown'));
+  assert.equal((await refresh.BH.aiScreen(job('refresh-before-retry'))).ok, true);
+  assert.deepEqual(refresh.postURLs(), [PRIMARY], '独立巡检的有序列表不被历史冷却记录过滤');
   clock.now = retryAt + 1;
   assert.equal((await refresh.BH.aiScreen(job('refresh-after-retry'))).ok, true);
-  assert.equal(refresh.postURLs().length, 1);
+  assert.equal(refresh.postURLs().length, 2);
 });
 
-test('最后成功 API 的优先选择跨刷新保留', async (t) => {
+test('最后成功 API 不改变用户设置顺序，刷新后从第一项重试', async (t) => {
   const store = new Map();
   const f = await fixture(t, { store, gm: (o) => o.url === PRIMARY ? response(o, 401, {}) : response(o, 200, good()) });
   assert.equal((await f.BH.aiScreen(job())).ok, true);
   const refresh = await fixture(t, { store });
   assert.equal((await refresh.BH.aiScreen(job('after-refresh'))).ok, true);
-  assert.deepEqual(refresh.postURLs(), [BACKUP]);
+  assert.deepEqual(refresh.postURLs(), [PRIMARY]);
   assert.equal(refresh.BH.loadStats().aiCalls, 3);
 });
 
@@ -198,6 +201,20 @@ test('请求预算耗尽时禁止切换服务继续调用', async (t) => {
   assert.equal(f.postURLs().length, 1);
 });
 
+test('额度不足保留岗位，修改每日额度后立即重新从首项判断', async (t) => {
+  const f = await fixture(t, { cfg: { aiDailyLimit: 1 }, gm: (o) => response(o, 503, {}) });
+  const waiting = f.BH.runAIGate(null, job());
+  await until(() => f.BH.state._aiFailStreak >= 1, '额度不足进入等待');
+  assert.deepEqual(f.postURLs(), [PRIMARY], '每日额度不足不调用备用');
+  assert.equal(f.BH.state.paused, false);
+  f.setGM((o) => response(o, 200, good()));
+  f.BH.state.config.aiDailyLimit = 2;
+  const gate = await waiting;
+  assert.equal(gate.action, 'accept');
+  assert.deepEqual(f.postURLs(), [PRIMARY, PRIMARY]);
+  assert.equal(f.BH.loadStats().aiCalls, 2);
+});
+
 test('单 API GM 超时后 fetch 也独立计数，限额为 1 时禁止 fetch 重发', async (t) => {
   const f = await fixture(t, { cfg: { aiDailyLimit: 1, aiEndpoints: [] }, gm: (o) => o.ontimeout(),
     fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(good()) }) });
@@ -230,6 +247,21 @@ test('AI 缓存不受运行中服务切换影响，修改备用模型则失效',
   assert.equal(changed.cached, false);
   assert.equal(f.postURLs().at(-1), BACKUP);
   assert.equal(f.requests.at(-1).body.model, 'new-backup-model');
+});
+
+test('升级后不沿用 v21 的旧拒绝缓存，重新取得当前 AI 结论', async (t) => {
+  const f = await fixture(t, { cfg: { aiCacheEnabled: true } });
+  const target = job('old-refusal-cache');
+  f.BH.setAICache(target.jobId, { match: false, score: 0, reason: '旧版本错误拒绝' }, target);
+  const cached = f.store.get('boss_helper_ai_cache_v1');
+  cached[target.jobId].pf = cached[target.jobId].pf.replace(/^v114\|/, 'v21|');
+  f.store.set('boss_helper_ai_cache_v1', cached);
+  f.win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(cached));
+  const result = await f.BH.aiScreen(target);
+  assert.equal(result.ok, true);
+  assert.equal(result.match, true);
+  assert.equal(result.cached, false);
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
 });
 
 test('等待响应期间修改 API 设置使旧结论作废，不写缓存', async (t) => {
@@ -299,21 +331,53 @@ test('拉取备用模型列表的 HTTP 错误回显 Authorization 也会脱敏',
   assert.equal(f.requests[0].url, 'https://backup.example/v1/models');
 });
 
-test('全部 API 断连时 pause 等待人工，恢复不能反复绕过冷却', async (t) => {
-  const f = await fixture(t, { cfg: { aiFallback: 'pause' }, gm: (o) => response(o, 401, {}) });
+for (const fallback of ['local', 'skip', 'pause']) {
+  test(`全部 API 断连时 ${fallback} 旧策略均等一分钟后重试完整列表`, async (t) => {
+    const f = await fixture(t, { cfg: { aiFallback: fallback }, gm: (o) => response(o, 401, {}) });
+    const waiting = f.BH.runAIGate(null, job());
+    await until(() => f.postURLs().length === 2, '应先尝试所有接口');
+    await delay(350);
+    assert.equal(f.postURLs().length, 2, '一分钟内不重复发送请求');
+    assert.equal(f.BH.state.paused, false, '临时故障自动等待，不要求人工恢复');
+    f.setGM((o) => o.url === PRIMARY ? response(o, 401, {}) : response(o, 200, good()));
+    f.time.now += 60001;
+    const gate = await waiting;
+    assert.equal(gate.action, 'accept');
+    assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP, PRIMARY, BACKUP]);
+    assert.equal(gate.endpointId, 'backup');
+    assert.equal(f.BH.loadStats().aiCalls, 4);
+  });
+}
+
+test('一分钟等待中停止立即结束且不消耗该职位', async (t) => {
+  const f = await fixture(t, { gm: (o) => response(o, 503, {}) });
   const waiting = f.BH.runAIGate(null, job());
-  await until(() => f.BH.state.paused, '所有服务失败后应暂停');
-  assert.equal(f.postURLs().length, 2);
-  await delay(100);
-  assert.equal(f.postURLs().length, 2, '人工处理期间没有后台忙重试');
-  f.BH.state.paused = false;
-  await until(() => f.BH.state.paused, '冷却未结束时恢复后仍暂停');
-  assert.equal(f.postURLs().length, 2, '继续不能绕过故障冷却');
-  f.BH.state.config.aiEndpoints[0].apiKey = 'sk-repaired-backup-fixture';
+  await until(() => f.postURLs().length === 2, '完整尝试后开始等待');
+  f.BH.state.stopFlag = true;
+  const gate = await waiting;
+  assert.equal(gate.action, 'stop');
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
+});
+
+test('暂停期间即使已到重试时间也不发送请求，继续后重新巡检', async (t) => {
+  const f = await fixture(t, { gm: (o) => response(o, 503, {}) });
+  const waiting = f.BH.runAIGate(null, job());
+  await until(() => f.postURLs().length === 2, '全部接口已尝试');
+  f.BH.state.paused = true;
+  f.time.now += 60001;
   f.setGM((o) => response(o, 200, good()));
+  await delay(350);
+  assert.equal(f.postURLs().length, 2, '人工暂停优先于自动重试');
   f.BH.state.paused = false;
   const gate = await waiting;
   assert.equal(gate.action, 'accept');
-  assert.equal(f.postURLs().length, 3);
-  assert.equal(f.postURLs().at(-1), BACKUP);
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP, PRIMARY]);
+});
+
+test('单接口失败每轮只试一次，不沿用秒级重试', async (t) => {
+  const f = await fixture(t, { cfg: { aiEndpoints: [], aiMaxRetries: 3 }, gm: (o) => response(o, 503, {}) });
+  const result = await f.BH.aiScreen(job());
+  assert.equal(result.apiUnavailable, true);
+  assert.equal(result.retryDelayMs, 60000);
+  assert.deepEqual(f.postURLs(), [PRIMARY]);
 });

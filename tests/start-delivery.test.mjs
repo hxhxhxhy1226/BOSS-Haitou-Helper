@@ -21,7 +21,7 @@ function detail(job, text = JD) {
 }
 
 async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, primaryFails = false,
-  jobs = [JOB], onContact, onRequest, stopAfter = 1 } = {}) {
+  jobs = [JOB], onContact, onRequest, stopAfter = 1, settings = {} } = {}) {
   const values = new Map();
   const requests = [], errors = [];
   const html = `<ul class="job-list-wrapper">${jobs.map((job) => `<li class="job-card-box" data-jobid="${job.data}" data-fixture-id="${job.id}">
@@ -44,7 +44,7 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
   win.unsafeWindow = win;
   win.GM_xmlhttpRequest = (o) => {
     requests.push({ url: o.url, model: JSON.parse(o.data).model });
-    if (onRequest) onRequest(win, o);
+    if (onRequest && onRequest(win, o) === false) return { abort() {} };
     setTimeout(() => o.onload({ status: primaryFails && o.url.includes('primary.example') ? 503 : 200,
       responseText: JSON.stringify({ choices: [{ message: { content: '{"match":true,"score":95,"reason":"岗位方向匹配"}' } }] }) }), 0);
     return { abort() {} };
@@ -65,6 +65,7 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
     aiEnabled, aiPrimaryEnabled: true, aiBaseUrl: 'https://primary.example/v1', aiApiKey: 'fixture-primary-key', aiModel: 'fixture-primary',
     aiMaxRetries: 0, aiDailyLimit: 100, aiFallback: 'skip', aiUserPortrait: '寻找 STM32、FreeRTOS 嵌入式软件研发岗位',
     aiEndpoints: primaryFails ? [{ id: 'backup', name: '备用', enabled: true, baseUrl: 'https://backup.example/v1', apiKey: 'fixture-backup-key', model: 'fixture-backup' }] : [],
+    ...settings,
   });
   let expands = 0, clicks = 0, countAtClick = 0;
   for (const card of win.document.querySelectorAll('.job-card-box')) card.addEventListener('click', (e) => {
@@ -96,6 +97,63 @@ async function waitUntil(condition, timeout = 15000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (condition()) return; await delay(25); }
 }
+
+for (const aiEnabled of [false, true]) {
+  test(`离线完整投递：AI${aiEnabled ? '未配置' : '关闭'}，MCU别名命中STM32后只发起一次沟通`, { timeout: 20000 }, async (t) => {
+    const f = await fixture(t, { aiEnabled, settings: { aiApiKey: '', mustHave: ['MCU'], mustHaveMin: 1 } });
+    f.start();
+    await waitUntil(() => f.clickCount() > 0 || /主循环异常/.test(f.logs()));
+    assert.equal(f.clickCount(), 1, f.logs());
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.countAtClick(), 31);
+    assert.equal(f.win.BH.loadStats().skipped, 0);
+    if (aiEnabled) assert.match(f.logs(), /本地规则复核通过/);
+  });
+}
+
+test('AI已开启但未配置时完整复核必含词，不能只检查排除词后放行', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, settings: { aiApiKey: '', mustHave: ['射频天线设计'], mustHaveMin: 1, maxRounds: 1 } });
+  f.start();
+  await waitUntil(() => f.stopped() || f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1', 12000);
+  assert.equal(f.clickCount(), 0, f.logs());
+  assert.equal(f.requests.length, 0);
+  assert.match(f.logs(), /必含词仅命中/);
+});
+
+test('全部AI接口故障时保留当前卡片等待，停止立即结束且不记跳过或占投递额度', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, primaryFails: true,
+    onRequest(win, o) {
+      queueMicrotask(() => o.onload({ status: 503, responseText: '{"error":{"message":"offline"}}' }));
+      return false;
+    } });
+  f.start();
+  await waitUntil(() => /一分钟后重试全部接口/.test(f.logs()), 12000);
+  assert.equal(f.requests.length, 2, f.logs());
+  assert.equal(f.clickCount(), 0);
+  assert.equal(f.win.document.querySelector('.job-card-box').dataset.bhProcessed, undefined);
+  assert.equal(f.win.BH.loadStats().skipped, 0);
+  assert.equal(f.win.BH.loadStats().sent, 30);
+  assert.equal(f.win.BH.loadStats().pending, 0);
+  f.win.BH.stop('测试停止');
+  await waitUntil(() => f.stopped(), 1500);
+  assert.equal(f.stopped(), true, f.logs());
+  assert.equal(f.requests.length, 2);
+});
+
+test('请求途中暂停后AI成功响应仍保留岗位，恢复后只沟通一次', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, onRequest(win) { win.BH.state.paused = true; } });
+  f.start();
+  await waitUntil(() => f.requests.length === 1, 10000);
+  await delay(200);
+  assert.equal(f.win.BH.state.paused, true);
+  assert.equal(f.clickCount(), 0);
+  assert.equal(f.win.document.querySelector('.job-card-box').dataset.bhProcessed, undefined);
+  f.win.BH.state.paused = false;
+  await waitUntil(() => f.clickCount() === 1, 10000);
+  assert.equal(f.clickCount(), 1, f.logs());
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.win.BH.loadStats().skipped, 0);
+});
 
 for (const scenario of [
   { label: '本地筛选', aiEnabled: false },

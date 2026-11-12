@@ -71,6 +71,17 @@ async function waitForUI(condition, description, timeoutMs = 2000) {
   }
 }
 
+// Advance the window clock only in retry tests; the production wait remains one minute.
+async function withAIClock(run) {
+  const NativeDate = win.Date;
+  const clock = { now: NativeDate.now() };
+  win.Date = class extends NativeDate {
+    constructor(...args) { super(...(args.length ? args : [clock.now])); }
+    static now() { return clock.now; }
+  };
+  try { return await run(clock); } finally { win.Date = NativeDate; }
+}
+
 const CFG = (over = {}) => ({
   ...BH.loadConfig(),
   aiEnabled: true,
@@ -254,7 +265,7 @@ section('6. 失败与重试（4.4）');
   n = 0;
   netHandler = (o) => { n++; reply(o, { error: { message: 'server error' } }, 500); };
   const r500 = await BH.aiScreen({ title: 't', jd: 'x', jobId: 'T3' });
-  ok('5xx 按 aiMaxRetries 重试（共 2 次）', r500.ok === false && n === 2, 'n=' + n);
+  ok('5xx 单轮只请求一次，交给闸门一分钟后完整重试', r500.apiUnavailable === true && n === 1 && r500.retryDelayMs === 60000, 'n=' + n);
 
   resetAll(); setCfg(CFG());
   netHandler = (o) => reply(o, '这不是 JSON');
@@ -449,7 +460,7 @@ section('11. 配置持久化回归（AI 开关必须能留住）');
 }
 
 // ============================================================
-section('12. runAIGate 三档降级与连续失败（第五节）');
+section('12. runAIGate AI 优先、无配置离线与连续失败重试');
 {
   const job = { title: '测试职位', company: 'C', salary: '20-30K', jd: 'x', jobId: 'G1' };
 
@@ -465,58 +476,30 @@ section('12. runAIGate 三档降级与连续失败（第五节）');
   g = await BH.runAIGate(null, job);
   ok('AI 拒绝 → action=reject 且带理由', g.action === 'reject' && g.reason === '方向不符');
 
-  // local 降级
-  resetAll(); setCfg(CFG({ aiFallback: 'local' }));
-  netHandler = (o) => o.ontimeout();
-  g = await BH.runAIGate(null, job);
-  ok('local 策略：失败 → accept 且 degraded=true', g.action === 'accept' && g.degraded === true);
-  ok('local 策略：连续失败计数累加', BH.state._aiFailStreak === 1);
+  for (const fallback of ['local', 'skip', 'pause']) {
+    resetAll(); setCfg(CFG({ aiFallback: fallback, aiApiKey: '', yearsMin: 0, eduMin: 0 }));
+    g = await BH.runAIGate(null, job);
+    ok('无配置 + ' + fallback + ' 旧策略：完整本地规则通过即放行',
+       g.action === 'accept' && g.local === true && !g.degraded && netCalls === 0 && !BH.state.paused, JSON.stringify(g));
+  }
 
-  // skip 降级
-  resetAll(); setCfg(CFG({ aiFallback: 'skip' }));
-  netHandler = (o) => o.ontimeout();
-  g = await BH.runAIGate(null, job);
-  ok('skip 策略：失败 → action=skip', g.action === 'skip');
-
-  // 连续 3 次失败 → streak 达到 3（触发红闪但不中断）
-  resetAll(); setCfg(CFG({ aiFallback: 'local' }));
-  netHandler = (o) => o.ontimeout();
-  await BH.runAIGate(null, { ...job, jobId: 'S1' });
-  await BH.runAIGate(null, { ...job, jobId: 'S2' });
-  await BH.runAIGate(null, { ...job, jobId: 'S3' });
-  ok('连续 3 次失败 → _aiFailStreak 达到 3', BH.state._aiFailStreak === 3, 'streak=' + BH.state._aiFailStreak);
-  ok('连续失败不会中断（仍返回 accept 降级放行）', (await BH.runAIGate(null, { ...job, jobId: 'S4' })).action === 'accept');
-  ok('成功后连续失败计数归零', (() => {
-    netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":70,"reason":"ok"}' } }] });
-    return true;
-  })());
-  resetAll(); setCfg(CFG());
-  netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":70,"reason":"ok"}' } }] });
-  BH.state._aiFailStreak = 2;
-  await BH.runAIGate(null, { ...job, jobId: 'S5' });
-  ok('AI 成功一次后 _aiFailStreak 归零', BH.state._aiFailStreak === 0);
-
-  // pause 策略：进入暂停后，外部把 paused 置回 false 即恢复并重试
-  // （aiMaxRetries=0，避免重试退避 sleep 干扰时序判断）
-  resetAll(); setCfg(CFG({ aiFallback: 'pause', aiMaxRetries: 0 }));
-  netHandler = (o) => o.ontimeout();
-  const gatePromise = BH.runAIGate(null, job);
-  await new Promise((r) => setTimeout(r, 120));
-  ok('pause 策略：失败后 state.paused 置为 true', BH.state.paused === true);
-  // 模拟用户点「继续」
-  // 断连 API 会被冷却；模拟修复 Key 后恢复，不能靠「继续」绕过冷却。
-  BH.state.config.aiApiKey = 'fixture-rotated-api-key';
-  BH.state.paused = false;
-  // 第二次仍失败 → 会再次进入暂停；这里改成成功让它退出
-  netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":66,"reason":"恢复后通过"}' } }] });
-  g = await gatePromise;
-  ok('pause 策略：恢复后重新判断并通过', g.action === 'accept' && g.reason === '恢复后通过', JSON.stringify(g));
-  ok('pause 策略：恢复后 state.paused 回到 false', BH.state.paused === false);
-
-  // 未填 Key 也遵循 local 回退；这个岗位未命中排除词，可以放行。
-  resetAll(); setCfg(CFG({ aiApiKey: '' }));
-  g = await BH.runAIGate(null, job);
-  ok('未填 Key 且未命中排除词时按 local 策略放行', g.action === 'accept' && g.degraded === true);
+  resetAll(); setCfg(CFG({ aiFallback: 'skip', aiCacheEnabled: false }));
+  await withAIClock(async (clock) => {
+    netHandler = (o) => reply(o, { error: { message: 'server offline' } }, 503);
+    let settled = false;
+    const pending = BH.runAIGate(null, job).then((result) => { settled = true; return result; });
+    for (let round = 1; round <= 3; round++) {
+      await waitForUI(() => BH.state._aiFailStreak >= round, '第 ' + round + ' 轮失败');
+      ok('第 ' + round + ' 轮失败保留当前岗位，不静默跳过', !settled && !BH.state.paused);
+      if (round < 3) clock.now += 60001;
+    }
+    ok('连续失败计数达到 3', BH.state._aiFailStreak === 3);
+    netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":66,"reason":"恢复后通过"}' } }] });
+    clock.now += 60001;
+    g = await pending;
+    ok('一分钟重试后服务恢复，使用真实 AI 结论通过', g.action === 'accept' && g.reason === '恢复后通过' && netCalls === 4, JSON.stringify(g));
+    ok('AI 成功一次后连续失败计数归零', BH.state._aiFailStreak === 0);
+  });
 }
 
 // ============================================================
@@ -1736,7 +1719,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v21（方向匹配重写，旧结论不得沿用）', /\bv21\b/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v114（旧误拒结论不得沿用）', /^v114\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2036,8 +2019,8 @@ section('35. 所有排除词交给 AI：技术培训真实 JD 与语义对照（
 
   const off = BH.matchJob(trainingDutyJob.jd, trainingDutyJob.activeText, trainingDutyJob.salary,
     { ...cfg, aiEnabled: false }, {});
-  ok('真实 JD：关闭 AI 后保留原有字面排除行为',
-     off.matched === false && off.reason === '命中排除词：培训' && off.details.stage === 'mustNot', off.reason);
+  ok('真实 JD：关闭 AI 后识别技术培训职责，不因孤立词拒绝',
+     off.matched === true, off.reason);
   ok('关闭 AI 后不声称排除词已经交给 AI', !off.details.mustNotDeferredToAI);
 
   const inactive = BH.matchJob(trainingDutyJob.jd, '2个月前活跃', trainingDutyJob.salary, cfg, {});
@@ -2153,7 +2136,7 @@ section('36. 排除词提示边界与盲投（v1.0.18）');
 }
 
 // ============================================================
-section('37. AI 失败后的本地复核、缺 Key 与其他回退策略（v1.0.18）');
+section('37. 临时故障保留岗位，无配置按全部本地条件复核');
 {
   const failures = [
     { name: '接口超时', handler: (o) => o.ontimeout() },
@@ -2165,40 +2148,47 @@ section('37. AI 失败后的本地复核、缺 Key 与其他回退策略（v1.0.
   for (const f of failures) {
     resetAll(); setCfg(semanticCfg({ mustNot: ['培训'], aiFallback: 'local', ...f.config }));
     netHandler = f.handler || (() => { throw new Error('这个失败场景不应联网'); });
-    const g = await BH.runAIGate(null, trainingDutyJob);
-    ok(f.name + '：local 回退重新按字面规则拦截“培训”',
-       g.action === 'skip' && g.degraded === true && /排除词/.test(g.reason || '') && /培训/.test(g.reason || ''), JSON.stringify(g));
+    let settled = false;
+    const pending = BH.runAIGate(null, trainingDutyJob).then((result) => { settled = true; return result; });
+    if (f.name !== '缺少 API Key') {
+      await waitForUI(() => BH.state._aiFailStreak >= 1, f.name + '进入自动等待');
+      ok(f.name + '：没有真实 AI 结论时保留岗位等待，不降级跳过', !settled && !BH.state.paused);
+      setCfg(semanticCfg({ mustNot: ['培训'], aiApiKey: '' }));
+    }
+    const g = await pending;
+    ok(f.name + '：未配置 AI 后完整本地复核，技术培训职责可以通过',
+       g.action === 'accept' && g.local === true && !g.degraded, JSON.stringify(g));
     if (f.config) ok(f.name + '：不发送无效请求', netCalls === 0, 'netCalls=' + netCalls);
   }
 
   resetAll(); setCfg(semanticCfg({ mustNot: ['培训', '外包|驻场'], aiApiKey: '' }));
   const noHit = await BH.runAIGate(null, { ...trainingDutyJob, jd: 'STM32 产品软件研发，负责 DSP 驱动及单元测试。', jobId: 'FALLBACK_NO_HIT' });
-  ok('local 回退未命中排除词时可以放行，且标明降级',
-     noHit.action === 'accept' && noHit.degraded === true, JSON.stringify(noHit));
-  const altHit = await BH.runAIGate(null, { ...trainingDutyJob, jd: '负责驻场开发，服务客户的软件项目。', jobId: 'FALLBACK_ALT' });
-  ok('local 回退保留词组中的 OR 匹配，不只检查首个排除词',
-     altHit.action === 'skip' && altHit.degraded === true && /外包|驻场/.test(altHit.reason || ''), JSON.stringify(altHit));
+  ok('无 AI 且符合全部本地条件时可以放行',
+     noHit.action === 'accept' && noHit.local === true && !noHit.degraded, JSON.stringify(noHit));
+  const altHit = await BH.runAIGate(null, { ...trainingDutyJob, jd: '负责 STM32 驻场开发，服务客户的软件项目。', jobId: 'FALLBACK_ALT' });
+  ok('无 AI 时保留词组中的 OR 匹配，不只检查首个排除词',
+     altHit.action === 'skip' && altHit.local === true && /外包|驻场/.test(altHit.reason || ''), JSON.stringify(altHit));
 
   BH.state.skipKeywordCheck = true;
   const blind = await BH.runAIGate(null, trainingDutyJob);
-  ok('盲投时 local 回退也尊重跳过关键词开关',
-     blind.action === 'accept' && blind.degraded === true, JSON.stringify(blind));
+  ok('无 AI 的本地规则也尊重跳过关键词开关',
+     blind.action === 'accept' && blind.local === true, JSON.stringify(blind));
 
   resetAll(); setCfg(semanticCfg({ aiFallback: 'skip', aiApiKey: '' }));
   const skipNoKey = await BH.runAIGate(null, trainingDutyJob);
-  ok('缺 Key 时遵守 skip 策略，不再直接放行', skipNoKey.action === 'skip' && netCalls === 0, JSON.stringify(skipNoKey));
+  ok('缺 Key 时忽略旧 skip 策略，符合本地条件便放行', skipNoKey.action === 'accept' && skipNoKey.local === true && netCalls === 0, JSON.stringify(skipNoKey));
 
-  resetAll(); setCfg(semanticCfg({ aiFallback: 'pause', aiApiKey: '' }));
+  resetAll(); setCfg(semanticCfg({ aiFallback: 'pause', aiDailyLimit: 0 }));
   const waiting = BH.runAIGate(null, trainingDutyJob);
-  await new Promise((r) => setTimeout(r, 120));
-  ok('缺 Key 时遵守 pause 策略，等待恢复', BH.state.paused === true && netCalls === 0);
-  BH.state.config.aiApiKey = 'sk-testkey-after-repair';
+  await waitForUI(() => BH.state._aiFailStreak >= 1, '额度耗尽进入等待');
+  ok('额度耗尽保留当前岗位，等待恢复且不发送请求', !BH.state.paused && netCalls === 0);
+  BH.state.config.aiDailyLimit = 100;
   netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":88,"reason":"技术培训是研发职责"}' } }] });
   BH.state.paused = false;
   const guard = setTimeout(() => { BH.state.stopFlag = true; BH.state.paused = false; }, 2000);
   const recovered = await waiting;
   clearTimeout(guard);
-  ok('补上 Key 并恢复后重新请求 AI，沿用正常结论',
+  ok('提高额度后重新请求 AI，沿用正常结论',
      recovered.action === 'accept' && recovered.reason === '技术培训是研发职责' && netCalls === 1, JSON.stringify(recovered));
   resetAll();
 }
@@ -2408,7 +2398,7 @@ section('41. 长 JD 优先保留全部排除上下文，证据超预算时不得
 }
 
 // ============================================================
-section('42. 响应等待或暂停期间修改规则，回退使用最新配置（v1.0.18）');
+section('42. 响应等待或暂停期间切换离线，使用最新规则');
 {
   for (const addExclusion of [true, false]) {
     resetAll();
@@ -2417,19 +2407,21 @@ section('42. 响应等待或暂停期间修改规则，回退使用最新配置�
     let arrived;
     const arrival = new Promise((resolve) => { arrived = resolve; });
     netHandler = (o) => { heldRequest = o; arrived(); };
-    const pending = BH.runAIGate(null, trainingDutyJob);
-    await arrival;
+    const chargeJob = { ...trainingDutyJob, jd: '负责 STM32 控制固件开发，入职前需缴纳培训费。' };
+    const pending = BH.runAIGate(null, chargeJob);
+    await waitForUI(() => heldRequest, '等待响应修改规则用例发出 AI 请求');
     // 保存设置会替换 state.config 对象，不只修改旧对象的属性。
-    setCfg(semanticCfg({ mustNot: addExclusion ? ['培训'] : [], aiFallback: 'local' }));
+    setCfg(semanticCfg({ mustNot: addExclusion ? ['培训'] : [], aiFallback: 'local', aiApiKey: '' }));
     heldRequest.ontimeout();
     const g = await pending;
-    ok('等待失败响应时' + (addExclusion ? '新增' : '删除') + '排除词，local 回退采用新值',
-       g.action === (addExclusion ? 'skip' : 'accept') && g.degraded === true
+    ok('等待失败响应时' + (addExclusion ? '新增' : '删除') + '排除词并切离线，复核采用新值',
+       g.action === (addExclusion ? 'skip' : 'accept') && g.local === true
        && (!addExclusion || /培训/.test(g.reason || '')), JSON.stringify(g));
   }
 
   resetAll(); setCfg(semanticCfg({ mustNot: [], aiFallback: 'pause', aiApiKey: '' }));
-  const waiting = BH.runAIGate(null, trainingDutyJob);
+  BH.state.paused = true;
+  const waiting = BH.runAIGate(null, { ...trainingDutyJob, jd: '负责 STM32 驱动开发，需先缴培训费。' });
   await new Promise((r) => setTimeout(r, 120));
   ok('暂停期间修改规则用例进入等待状态', BH.state.paused === true);
   setCfg(semanticCfg({ mustNot: ['培训'], aiFallback: 'local', aiApiKey: '' }));
@@ -2437,8 +2429,8 @@ section('42. 响应等待或暂停期间修改规则，回退使用最新配置�
   const guard = setTimeout(() => { BH.state.stopFlag = true; BH.state.paused = false; }, 2000);
   const g = await waiting;
   clearTimeout(guard);
-  ok('暂停后改为 local 并新增排除词，恢复时采用新策略和新排除词',
-     g.action === 'skip' && g.degraded === true && /培训/.test(g.reason || '') && !BH.state.paused, JSON.stringify(g));
+  ok('暂停后新增排除词，恢复时采用新本地规则',
+     g.action === 'skip' && g.local === true && /培训/.test(g.reason || '') && !BH.state.paused, JSON.stringify(g));
   resetAll();
 }
 
@@ -2715,8 +2707,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v21（v20 及更早结论自动失效）',
-     /^v21\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v114（v21 及更早结论自动失效）',
+     /^v114\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 

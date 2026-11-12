@@ -248,6 +248,63 @@ test('完整公开 URL ID 支持大小写、下划线、连字符和 .html，不
   assert.equal(String(snapshot.dataJobId), '987654');
 });
 
+test('列表 data-jobid 是公开加密 ID、详情是数字内部 ID 时确认同一岗位', async (t) => {
+  const target = { ...B, title: '机器人嵌入式软件工程师（校招）', company: 'Dobot' };
+  const f = await fixture(t, mountWithCard(detail(target, NEW_JD), { ...target, dataJobId: target.jobId }));
+  const expected = f.expected();
+  assert.equal(expected.jobId, target.jobId);
+  assert.equal(expected.dataJobId, '', '公开链接的别名不能留在内部 ID 字段');
+  const snapshot = await f.BH.waitForJobSnapshot(expected, { ...WAIT, requireChange: false });
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.equal(snapshot.jobId, target.jobId);
+  assert.equal(snapshot.dataJobId, target.dataJobId);
+});
+
+test('详情页头的公开 data ID 与正文的数字内部 ID 不造成歧义', async (t) => {
+  const markup = detail(B, NEW_JD).replace('<header class="job-banner">',
+    `<header class="job-banner" data-job-id="${B.jobId}">`);
+  const f = await fixture(t, mountWithCard(markup, B));
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.equal(snapshot.dataJobId, B.dataJobId);
+});
+
+test('无详情公开链接时，已知目标公开 ID 仍可辨认 data ID 别名', async (t) => {
+  const markup = detail({ ...B, dataJobId: B.jobId }, NEW_JD)
+    .replace(/<a class="job-detail-link"[^>]*>[\s\S]*?<\/a>/g, '');
+  const f = await fixture(t, mountWithCard(markup, B));
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.equal(snapshot.jobId, B.jobId);
+  assert.equal(snapshot.dataJobId, '');
+});
+
+test('已知公开 ID 的 data 别名不会掩盖真正的内部 ID 冲突或另一职位', async (t) => {
+  const extra = `<span data-job-id="${B.jobId}"></span>`;
+  const f = await fixture(t, mountWithCard(detail({ ...B, dataJobId: A.dataJobId }, NEW_JD, extra), B));
+  assert.equal(f.BH.extractJobSnapshot(f.expected()).ok, false, '数字内部 ID 冲突仍拒绝');
+  f.host().innerHTML = detail({ ...B, jobId: A.jobId, dataJobId: A.jobId }, NEW_JD);
+  assert.equal(f.BH.extractJobSnapshot(f.expected()).ok, false, '标题公司相同但公开 ID 不同仍拒绝');
+});
+
+test('无公开链接的 data ID 与另一侧公开 ID 相等时可核验，标题冲突仍拒绝', async (t) => {
+  const f = await fixture(t, mountWithCard(detail(B, NEW_JD), B));
+  const opaqueCard = { dataJobId: B.jobId, title: B.title, company: B.company };
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(f.BH.matchSnapshotIdentity(snapshot, opaqueCard).ok, true);
+  assert.equal(f.BH.matchSnapshotIdentity(opaqueCard, snapshot).ok, true);
+  assert.equal(f.BH.matchSnapshotIdentity(snapshot, { ...opaqueCard, title: A.title }).ok, false);
+});
+
+for (const experience of ['在校/应届', '在校生', '在校/应届生', '在校／应届']) {
+  test('校招标签保留真实经验字段：' + experience, async (t) => {
+    const f = await fixture(t, mountWithCard(detail(B, NEW_JD).replace('<span>3-5年</span>', `<span>${experience}</span>`), B));
+    const snapshot = f.BH.extractJobSnapshot(f.expected());
+    assert.equal(snapshot.ok, true, snapshot.reason);
+    assert.equal(snapshot.experience, experience);
+  });
+}
+
 test('职位 ID 相同但标题或公司与目标明显冲突仍不放行', async (t) => {
   const wrongTitle = { ...B, title: '电话销售工程师' };
   const f = await fixture(t, mountWithCard(detail(wrongTitle, NEW_JD), B));

@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.3 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.4 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -622,7 +622,7 @@
     } catch (_) { return ''; }
   }
 
-  function scopeJobIdentity(root, allowCard = false, includeHidden = false) {
+  function scopeJobIdentity(root, allowCard = false, includeHidden = false, knownPublicIds = []) {
     if (!root?.querySelectorAll) return { jobId: '', dataJobId: '', ambiguous: false };
     const ids = new Set(), dataIds = new Set();
     const allowed = (el) => (includeHidden || isReadableElement(el)) && !el.closest(JD_RECOMMEND_SEL)
@@ -633,13 +633,17 @@
       const id = publicJobId(link.getAttribute('href'));
       if (id) ids.add(id);
     }
+    // BOSS 的列表与详情布局可把公开加密 ID 或数字内部 ID 放在同名 data 属性里。
+    // 有公开链接（或已核验的目标 ID）对应的属性属于公开 ID，不能与数字内部 ID 比较。
+    const publicAliases = new Set([...ids, ...knownPublicIds].filter(Boolean));
     const dataNodes = [...(root.matches?.('[data-jobid], [data-job-id]') ? [root] : []),
       ...root.querySelectorAll('[data-jobid], [data-job-id]')];
     for (const node of dataNodes) {
       if (!allowed(node)) continue;
       for (const attribute of ['data-jobid', 'data-job-id']) {
         const id = (node.getAttribute(attribute) || '').trim();
-        if (id) dataIds.add(id);
+        if (id && publicAliases.has(id)) ids.add(id);
+        else if (id) dataIds.add(id);
       }
     }
     return {
@@ -683,7 +687,7 @@
         values.push(...readScopedText(el, { allowCard }).split(/\n|[·｜|]/).map((t) => t.trim()));
       }
     }
-    const experience = values.find((t) => /^(?:经验不限|不限经验|无经验要求|应届(?:生|毕业生)?|在校生|(?:经验|工作经验)?\s*\d+(?:\.\d+)?\s*(?:[-~～到至]\s*\d+(?:\.\d+)?)?\s*年(?:及以上|以上|以下|以内|经验)?(?:工作经验)?)$/.test(t)) || '';
+    const experience = values.find((t) => /^(?:经验不限|不限经验|无经验要求|应届(?:生|毕业生)?|在校(?:生)?(?:\s*[/／、或]\s*应届(?:生|毕业生)?)?|(?:经验|工作经验)?\s*\d+(?:\.\d+)?\s*(?:[-~～到至]\s*\d+(?:\.\d+)?)?\s*年(?:及以上|以上|以下|以内|经验)?(?:工作经验)?)$/.test(t)) || '';
     const education = values.find((t) => /^(?:学历不限|不限学历|(?:大专|专科|中专|中技|高中|初中|本科|学士|硕士|研究生|博士)(?:及以上|以上)?(?:学历)?)$/.test(t)) || '';
     return { experience, education };
   }
@@ -713,20 +717,25 @@
 
   function matchSnapshotIdentity(snapshot, expected) {
     if (snapshot?.ambiguous || expected?.ambiguous) {
-      return { ok: false, strength: 0, reason: '职位身份包含多个 ID，无法确认当前岗位' };
+      return { ok: false, conflict: true, strength: 0, reason: '职位身份包含多个 ID，无法确认当前岗位' };
     }
     if (!expected) return { ok: true, strength: 0 };
     let idMatch = false;
+    // 兼容没有公开链接的卡片：若其 data ID 等于另一侧公开 ID，也属于同一公开命名空间。
+    const snapshotPublic = snapshot.jobId || (snapshot.dataJobId === expected.jobId ? snapshot.dataJobId : '');
+    const expectedPublic = expected.jobId || (expected.dataJobId === snapshot.jobId ? expected.dataJobId : '');
+    const snapshotIds = { jobId: snapshotPublic, dataJobId: snapshot.dataJobId === snapshotPublic ? '' : snapshot.dataJobId };
+    const expectedIds = { jobId: expectedPublic, dataJobId: expected.dataJobId === expectedPublic ? '' : expected.dataJobId };
     for (const key of ['jobId', 'dataJobId']) {
-      if (!snapshot[key] || !expected[key]) continue;
-      if (snapshot[key] !== expected[key]) return { ok: false, strength: 0, reason: '详情职位 ID 与目标不一致' };
+      if (!snapshotIds[key] || !expectedIds[key]) continue;
+      if (snapshotIds[key] !== expectedIds[key]) return { ok: false, conflict: true, strength: 0, reason: '详情职位 ID 与目标不一致' };
       idMatch = true;
     }
     if (expected.title && snapshot.title && !identityTextMatches(snapshot.title, expected.title)) {
-      return { ok: false, strength: 0, reason: '详情标题尚未切换到目标岗位' };
+      return { ok: false, conflict: true, strength: 0, reason: '详情标题尚未切换到目标岗位' };
     }
     if (expected.company && snapshot.company && !identityTextMatches(snapshot.company, expected.company)) {
-      return { ok: false, strength: 0, reason: '详情公司与目标岗位不一致' };
+      return { ok: false, conflict: true, strength: 0, reason: '详情公司与目标岗位不一致' };
     }
     if (idMatch) return { ok: true, strength: 3 };
     if (identityTextMatches(snapshot.title, expected.title)) {
@@ -771,7 +780,7 @@
     const roots = discoverDetailRoots();
     const identityCache = new Map();
     const scopeIdentity = (scope) => {
-      if (!identityCache.has(scope)) identityCache.set(scope, scopeJobIdentity(scope));
+      if (!identityCache.has(scope)) identityCache.set(scope, scopeJobIdentity(scope, false, false, [target?.jobId, pageJobId]));
       return identityCache.get(scope);
     };
     const candidates = [];
@@ -938,7 +947,7 @@
       ? '当前为盲投模式：下方仅展示字面出处，不启用关键词筛选。'
       : cfg.aiEnabled
         ? '当前为 AI 模式：下方仅展示字面出处，是否排除由 AI 按上下文判断。'
-        : '当前为本地模式：排除词按字面匹配。');
+        : '当前为本地模式：排除词按文字与明确上下文匹配。');
     out.push('');
 
     const textOf = (el) => ((el?.innerText || el?.textContent || '') + '').trim();
@@ -1106,7 +1115,7 @@
     aiTemperature: 0.2,          // 低温度，判断类任务要稳定
     aiTimeoutMs: 20000,          // 单次调用超时
     aiMaxRetries: 1,             // 失败重试次数（仅网络类错误重试）
-    aiFallback: 'local',         // AI 失败降级：'local'=复核本地排除词 | 'skip'=跳过 | 'pause'=暂停等人工
+    aiFallback: 'local',         // 兼容旧配置；接口故障统一等待一分钟重试，未配置时使用完整本地规则
     aiDailyLimit: 100,           // 每日 AI 调用次数上限（控成本）
     aiMaxJDChars: 2500,          // 送入 AI 的 JD 最大字符数（截断，控 token）
     aiUserPortrait: '',          // 用户画像（自然语言）
@@ -1541,6 +1550,7 @@
     const clauses = String(text).split(/[\r\n，,。；;！？!?]+/);
     for (const clause of clauses) {
       const part = clause.trim().replace(/^(?:\d+[、.)）]|[一二三四五六七八九十]+[、.)）])(?!\d)\s*/, '');
+      if (/^(?:(?:工作)?经验[：:\s]*)?(?:在校(?:生)?|应届(?:毕业)?生?|在校(?:生)?\s*[\/／|、或]\s*应届(?:毕业)?生?)$/.test(part)) years.push(0);
       const re = /(\d+(?:\.\d+)?)\s*(?:[-~到至—–]\s*(\d+(?:\.\d+)?)\s*)?年(?:及以上|以上|以下|以内|左右)?/g;
       let m;
       while ((m = re.exec(part)) !== null) {
@@ -1657,6 +1667,7 @@
 
   function normalizeForMatch(text) {
     return String(text || '')
+      .normalize('NFKC')
       .toLowerCase()
       .replace(/＋/g, '+')
       .replace(/\s+/g, '')
@@ -1679,34 +1690,35 @@
       c: ['c语言', 'c开发', 'c编程', 'c嵌入式', 'c/c++'],
       cpp: ['c++', 'c＋＋', 'cplusplus', 'c/c++'],
       'c++': ['cpp', 'c＋＋', 'cplusplus', 'c/c++'],
-      stm32: ['stm32开发', 'stm32单片机', 'stm32cubemx', 'hal库'],
-      esp32: ['esp32开发', '乐鑫'],
-      arm: ['arm开发', 'arm平台', 'arm架构', 'arm显示界面'],
-      mcu: ['单片机', '微控制器'],
-      单片机: ['mcu', '微控制器'],
+      stm32: ['stm32开发', 'stm32单片机', 'stm32cubemx'],
+      esp32: ['esp32开发'],
+      arm: ['arm开发', 'arm平台', 'arm架构', 'cortex-m', 'cortex-r', 'cortex-a'],
+      mcu: ['单片机', '微控制器', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny'],
+      单片机: ['mcu', '微控制器', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny'],
+      微控制器: ['mcu', '单片机', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny'],
       嵌入式: ['嵌入式软件', '嵌入式开发', '嵌入式硬件', '嵌入式系统', '嵌入式图形库'],
       rtos: ['freertos', 'rt-thread', 'rtt', '实时操作系统'],
-      freertos: ['rtos', 'free rtos', '实时操作系统'],
-      rtt: ['rt-thread', 'rtos'],
-      'rt-thread': ['rtt', 'rtos'],
-      lvgl: ['嵌入式图形库', '图形库', 'gui', 'ui'],
-      gui: ['ui', '交互界面', '图形界面', '显示界面', 'lvgl'],
-      ui: ['gui', '交互界面', '图形界面', '显示界面', 'lvgl'],
-      驱动: ['驱动开发', '底层驱动', '外设驱动', '板级调试'],
-      底层: ['底层驱动', '驱动开发', '板级调试'],
+      freertos: ['free rtos'],
+      rtt: ['rt-thread'],
+      'rt-thread': ['rtt'],
+      lvgl: ['littlevgl'],
+      gui: ['图形用户界面', '图形界面'],
+      ui: ['用户界面'],
+      驱动: ['驱动开发', '底层驱动', '外设驱动'],
+      底层: ['底层驱动', '驱动开发'],
       硬件: ['硬件开发', '硬件工程师'],
       电子: ['电子开发', '电子工程'],
       电路: ['电路设计', 'pcb'],
       pcb: ['电路板', 'pcb设计'],
-      传感器: ['传感器数据', '数据采集', '采集验证'],
+      传感器: ['传感器数据'],
       显示: ['屏幕', '显示界面', 'ar显示'],
       屏幕: ['显示', '显示界面', 'ar显示'],
-      ota: ['在线升级', '远程升级', '固件升级', 'ota升级'],
+      ota: ['在线升级', '远程升级', 'ota升级'],
       boot: ['bootloader', '启动加载', '引导程序'],
-      bootloader: ['boot', '启动加载', '引导程序'],
+      bootloader: ['启动加载', '引导程序'],
       sdk: ['软件开发包'],
       gpio: ['io口', '通用输入输出'],
-      adc: ['模数转换', '采样'],
+      adc: ['模数转换'],
       dma: ['直接内存访问'],
       uart: ['串口', '串行通信'],
       spi: ['串行外设接口'],
@@ -1724,25 +1736,40 @@
   }
 
   function isAsciiKeyword(s) {
-    return /^[a-z0-9+#.-]+$/i.test(String(s || '').trim());
+    return /^[a-z0-9+#.-]+$/i.test(String(s || '').normalize('NFKC').trim());
   }
 
   function includesAsciiKeyword(text, kw) {
-    const source = String(text || '').replace(/＋/g, '+');
-    const key = String(kw || '').replace(/＋/g, '+').trim();
+    const source = String(text || '').normalize('NFKC').replace(/\bcortex\s+([mar])(?=\d|\b)/gi, 'cortex-$1');
+    const key = String(kw || '').normalize('NFKC').trim();
     if (!key) return false;
     const escaped = escapeRegExp(key);
-    // 英文/数字关键词必须有非字母数字边界，避免 AI 命中 maintain 这类单词。
-    return new RegExp(`(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`, 'i').test(source);
+    // 设备系列允许型号后缀；普通英文须为完整词，C / C++ / C# 各自独立。
+    const family = /^(?:stm32|stm8|esp32|gd32|ch32|msp430|nrf52|nrf53|atmega|attiny)$/i.test(key) ? '(?:[a-z]{0,2}\\d[a-z0-9]*)?'
+      : /^cortex-[mar]$/i.test(key) ? '(?:\\d[a-z0-9]*)?' : '';
+    const language = /^(?:c|c\+\+|c#)$/i.test(key);
+    const version = /^c\+\+$/i.test(key) ? '(?:0x|98|03|11|14|17|20|23|26)?'
+      : /^c$/i.test(key) ? '(?:89|90|99|11|17|23|51)?'
+        : /^c#$/i.test(key) ? '(?:\\d+(?:\\.\\d+)?)?' : '';
+    const boundary = language ? 'A-Za-z0-9+#' : 'A-Za-z0-9';
+    return new RegExp(`(^|[^${boundary}])${escaped}${family}${version}([^${boundary}]|$)`, 'i').test(source);
   }
 
   function includesKeyword(text, kw) {
-    const raw = String(kw || '').trim();
+    const raw = String(kw || '').normalize('NFKC').trim();
     if (!raw) return false;
     if (isAsciiKeyword(raw)) return includesAsciiKeyword(text, raw);
     const textNorm = normalizeForMatch(text);
     const kwNorm = normalizeForMatch(raw);
-    return !!kwNorm && textNorm.includes(kwNorm);
+    if (!kwNorm) return false;
+    // 混合词也保留英文边界，不能让「C语言」命中「PLC语言」。
+    const left = /^[a-z0-9]/i.test(kwNorm) ? '(^|[^a-z0-9])' : '';
+    const right = /[a-z0-9]$/i.test(kwNorm) ? '([^a-z0-9]|$)' : '';
+    return new RegExp(left + escapeRegExp(kwNorm) + right, 'i').test(textNorm);
+  }
+
+  function positiveKeywordHit(text, keyword) {
+    return expandKeywordAlts(keyword).find((alias) => includesKeyword(text, alias)) || '';
   }
 
   function hasAny(text, kws) {
@@ -1755,7 +1782,7 @@
       // 槽位内允许 | 或 / 表示"或"
       const alts = splitKeywordAlts(slot);
       if (alts.length === 0) return true;
-      return alts.some((a) => includesKeyword(text, a));
+      return alts.some((a) => positiveKeywordHit(text, a));
     });
   }
 
@@ -1773,6 +1800,44 @@
     };
   }
 
+  function localExclusionContextIgnored(clause, index, word) {
+    const before = clause.slice(0, index);
+    const after = clause.slice(index + word.length);
+    // 仅跳过紧邻的明确否定；「不接受非外包」等双重否定仍保留命中。
+    const denial = /(?:非|不是|并非|不属于|不涉及|不做|不需要|无需|无须|没有)[\s：:]*$/.exec(before);
+    if (denial && !/(?:不是|并非|不接受|不考虑|不属于|无需|无须|没有)[\s：:]*$/.test(before.slice(0, denial.index))) return true;
+    if (word === '培训') {
+      // 技术职责与入职福利中的培训，不等于培训招生岗位。
+      if (/(?:技术|产品|工艺|操作|内部|岗前|入职|员工|专业技能)[\s：:]*$/.test(before)
+          && !/^[\s：:]*(?:工程师|专员|顾问|经理|主管|负责人|教师|师|岗位|职位)/.test(after)
+          && !/(?:课程销售|培训招生|培训销售|招生顾问|培训讲师|培训老师)/.test(clause)) return true;
+    }
+    if (word === '销售') {
+      // 研发配合销售团队的技术支持不能推断成销售岗位。
+      if (/(?:配合|协助|支持)[\s：:]*$/.test(before)
+          && /^(?:团队|部门|人员|同事|工程师)?[^。；;]{0,24}(?:技术|产品演示|产品问题)/.test(after)) return true;
+    }
+    return false;
+  }
+
+  function findLocalMustNotHit(jdText, config) {
+    if (state.skipKeywordCheck || !config.mustNot?.length) return null;
+    const clauses = String(jdText || '').normalize('NFKC').split(/[\r\n，,。；;！？!?]+/);
+    for (const slot of config.mustNot) {
+      for (const alt of splitKeywordAlts(slot)) {
+        for (const clause of clauses) {
+          if (!includesKeyword(clause, alt)) continue;
+          const matches = [...clause.matchAll(new RegExp(escapeRegExp(alt), 'gi'))];
+          // 标点/空白规范化后才能命中的自定义词，保留原来的保守字面规则。
+          if (!matches.length || matches.some((hit) => !localExclusionContextIgnored(clause, hit.index, hit[0]))) {
+            return { stage: 'mustNot', hitWord: slot, hitAlt: alt, hitContext: clause.trim() };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   function matchJob(jdText, hrText, salText, config, vars, facts = {}) {
     const result = { matched: true, reason: '通过', details: {} };
 
@@ -1785,7 +1850,7 @@
       const slotHit = config.mustHave.map((slot) => {
         const alts = splitKeywordAlts(slot);
         if (alts.length === 0) return { hit: true, slot, hitAlt: '' };
-        const hitAlt = alts.find((a) => includesKeyword(jdText, a));
+        const hitAlt = alts.map((a) => positiveKeywordHit(jdText, a)).find(Boolean);
         return { hit: !!hitAlt, slot, hitAlt: hitAlt || '' };
       });
       const hitCount = slotHit.filter((s) => s.hit).length;
@@ -1798,7 +1863,7 @@
         return { matched: false, reason: `必含词仅命中 ${hitCount}/${config.mustHave.length}（需 ≥${minRequired}），缺：${miss.join('/')}`, details: result.details };
       }
     }
-    const mustNotHit = findMustNotHit(jdText, config);
+    const mustNotHit = config.aiEnabled ? findMustNotHit(jdText, config) : findLocalMustNotHit(jdText, config);
     if (config.aiEnabled === true && !state.skipKeywordCheck && config.mustNot?.length) {
       // 「技术培训」「配合销售」「非外包」都需要上下文，不能在 AI 前一票否决。
       result.details.mustNotDeferredToAI = true;
@@ -3105,13 +3170,13 @@
           <section class="bh-section">
             <h3 data-t="key">🔍 关键词</h3>
             <div class="bh-section-body">
-              <label>必含词 <small>（每行一个槽位，| 表示"或"）</small>
+              <label>必含词 <small>（换行/逗号分槽，| 或 / 表示“或”；本地支持常用技术别名）</small>
                 <textarea data-cfg="mustHave" rows="3" placeholder="嵌入式&#10;stm32&#10;c&#10;ARM&#10;AI|ai&#10;freeRTOS&#10;OTA\\ota&#10;bootloader\\boot"></textarea>
               </label>
               <label>必含命中阈值 <small>（0 = 命中任意 1 个即通过）</small>
                 <input type="number" min="0" max="20" data-cfg="mustHaveMin" placeholder="0 = 任意命中" />
               </label>
-              <label>排除词 <small>（每行一个；AI 开启时按上下文判断，关闭时字面命中即跳过）</small>
+              <label>排除词 <small>（每行一个；AI 按上下文判断，本地识别明确否定、技术培训和销售技术支持）</small>
                 <textarea data-cfg="mustNot" rows="2" placeholder="外包&#10;驻场&#10;销售"></textarea>
               </label>
             </div>
@@ -3329,7 +3394,7 @@
         `autoSend: ${cfg.autoSend !== false ? '开' : '关'}`,
         '',
         '=== AI 筛选 ===',
-        `AI 模式: ${cfg.aiEnabled ? '开启（排除词按上下文判断；学历/年限仅按求职画像；活跃度本地硬卡）' : '关闭（纯本地规则，排除词按字面匹配）'}`,
+        `AI 模式: ${cfg.aiEnabled ? '开启（排除词按上下文判断；学历/年限仅按求职画像；活跃度本地硬卡）' : '关闭（本地规则，技术别名与明确上下文匹配）'}`,
         `今日 AI 调用: ${stats.aiCalls || 0} / ${cfg.aiDailyLimit || 0}`,
         `AI 缓存命中: ${stats.aiHits || 0} 次（缓存条目 ${aiCacheSize()} 条，有效期 ${cfg.aiCacheDays || 7} 天）`,
         `当前生效筛选模式: ${cfg.aiEnabled ? 'aiSoftCriteria=true（必含词 + 排除词 + 薪资 为 AI 语义判断；学历/年限仅按求职画像；活跃度本地硬卡）' : 'aiSoftCriteria=false（本地硬卡：必含词 + 排除词 + 年限/学历/薪资/活跃度）'}`,
@@ -3341,7 +3406,7 @@
         `模型: ${cfg.aiModel || '(未填)'}`,
         `API Key: ${maskKey(cfg.aiApiKey)}`,
         `画像: ${cfg.aiUserPortrait ? (cfg.aiUserPortrait.length > 60 ? cfg.aiUserPortrait.slice(0, 60) + '…' : cfg.aiUserPortrait) : '(未填写，AI 仅按筛选标准做保守判断)'}`,
-        `降级策略: ${({ local: '复核本地排除词（字面匹配）', skip: '跳过', pause: '暂停等人工' })[cfg.aiFallback] || cfg.aiFallback}`,
+        '接口故障处理: 按设置顺序切换；全部不可用时等待一分钟重试；未配置 AI 时完整本地复核',
         `连续失败: ${state._aiFailStreak || 0} 次`,
         '',
         '=== 为什么停了？ ===',
@@ -3489,7 +3554,7 @@
         .find((card) => card.dataset.endpointId === endpoint.id);
       const label = endpoint.id === 'primary' ? wrap.querySelector('[data-primary-health]') : row?.querySelector('[data-endpoint-health]');
       if (!label) continue;
-      const statusNames = { ready: '待检测', unknown: '待检测', untested: '未测试', healthy: '可用', available: '可用', disabled: '已停用', cooldown: '暂不可用，冷却后自动重试', invalid: '配置不完整' };
+      const statusNames = { ready: '待检测', unknown: '待检测', untested: '未测试', healthy: '可用', available: '可用', disabled: '已停用', cooldown: '暂不可用，等待下一轮重试', invalid: '配置不完整' };
       const seconds = Math.max(0, Math.ceil(((endpoint.retryAt || 0) - Date.now()) / 1000));
       label.textContent = '状态：' + (statusNames[endpoint.status] || endpoint.status || '待检测')
         + (seconds > 0 ? `（${seconds} 秒后重试）` : '') + (endpoint.lastError ? ' · ' + endpoint.lastError : '');
@@ -3534,7 +3599,7 @@
             <div class="bh-ai-row">
               <div class="meta">
                 <div class="lbl">启用 AI 语义筛选</div>
-                <div class="desc">开启后「必含词 + 排除词 + 薪资」交给 AI 判断；<b>学历与工作年限默认不作为筛选条件</b>——只有「求职画像」里明确写出时才按画像判断（如「只投硕士以下」「工作经历 3 年」）；排除词结合岗位性质和上下文，<b>活跃度仍本地硬卡</b>。关闭后使用本地规则，排除词按字面匹配。</div>
+                <div class="desc">开启后「必含词 + 排除词 + 薪资」交给 AI 判断；<b>学历与工作年限默认不作为筛选条件</b>——只有「求职画像」里明确写出时才按画像判断（如「只投硕士以下」「工作经历 3 年」）；排除词结合岗位性质和上下文，<b>活跃度仍本地检查</b>。关闭后或未配置完整接口时使用完整本地规则，支持技术词别名与明确上下文。</div>
               </div>
               <div class="control">
                 <label class="bh-ai-toggle violet">
@@ -3548,7 +3613,7 @@
           <!-- 顶部提示卡 -->
           <div class="bh-ai-tip">
             <div class="bh-ai-tip-icon">i</div>
-            <div>支持多个 <b>OpenAI 兼容 API</b>。当前 API 断连、超时、限流、Key 失效或返回格式异常时，会自动切换到其他已启用的 API；故障 API 暂时冷却，冷却结束后可再次自动尝试。全部不可用时按下方降级策略处理。</div>
+            <div>支持多个 <b>OpenAI 兼容 API</b>。按设置顺序判断，第一个不可用立即尝试下一个。全部不可用时保留当前岗位，<b>等待一分钟再从第一个开始全部重试</b>，持续循环。可随时暂停、停止或关闭 AI 改用本地规则。</div>
           </div>
 
           <!-- v1.0.9：判断标准提醒卡；v1.0.20：学历/年限改为只认「求职画像」 -->
@@ -3659,11 +3724,11 @@
             </div>
             <div class="bh-ai-row">
               <div class="meta">
-                <div class="lbl">失败降级策略</div>
-                <div class="desc">所有已启用的 API 均失败或次数超限后的兜底；回退本地时排除词按字面匹配</div>
+                <div class="lbl">接口故障处理</div>
+                <div class="desc">全部失败后每分钟重试全部接口；请求达到每日上限时仍保留当前岗位，等待额度恢复或修改设置。未配置 AI 时复核完整本地条件。</div>
               </div>
               <div class="control">
-                <select class="bh-ai-select" data-cfg="aiFallback">
+                <select class="bh-ai-select" data-cfg="aiFallback" hidden aria-hidden="true">
                   <option value="local">复核本地排除词</option>
                   <option value="skip">跳过该职位</option>
                   <option value="pause">暂停等人工</option>
@@ -4393,6 +4458,7 @@
   }
 
   const AI_HEALTH_KEY = 'boss_helper_ai_health_v1';
+  const AI_RETRY_DELAY_MS = 60000;
   function getAIEndpoints(cfg = getAIConfig(), includeDisabled = false) {
     const text = (v) => String(v ?? '').trim();
     const endpoints = [{ id: 'primary', name: '主 API', enabled: cfg.aiPrimaryEnabled !== false,
@@ -4456,10 +4522,8 @@
       all[key] = { lastSuccessAt: Date.now(), failures: 0, retryAt: 0, lastError: '' };
     } else {
       const failures = (previous.failures || 0) + 1;
-      const cooldown = result.status === 401 || result.status === 403 ? 300000
-        : result.retryAfterMs || Math.min(300000, 30000 * Math.pow(2, Math.min(failures - 1, 4)));
       all[key] = { lastSuccessAt: previous.lastSuccessAt || 0, failures,
-        failedAt: Date.now(), retryAt: Date.now() + Math.max(1000, Math.min(cooldown, 3600000)),
+        failedAt: Date.now(), retryAt: Date.now() + AI_RETRY_DELAY_MS,
         lastError: safeAIError(result.err, cfg) };
     }
     writeAIHealth(all);
@@ -5222,9 +5286,10 @@
   // 旧结论自动失效，不会再把「JD 要求硕士/3年经验」的旧拒绝结论沿用过来。
   // v1.0.21：方向匹配规则重写（以画像为核心依据，顺带提及不算匹配）→ 版本升到 v21，
   // 旧结论自动失效，不会把大类岗位的旧"匹配"结论沿用过来。
+  // v1.1.4：重新巡检与本地条件复核修正，清除此前缓存的误拒结论。
   function aiCacheFingerprint(cfg) {
     cfg = cfg || getAIConfig();
-    return 'v21|' + stableAIHash({
+    return 'v114|' + stableAIHash({
       aiEnabled: cfg.aiEnabled === true,
       skipKeywordCheck: !!state.skipKeywordCheck,
       aiMaxJDChars: Number(cfg.aiMaxJDChars || 2500),
@@ -5323,9 +5388,9 @@
     const title = job.title || '(无标题)';
 
     // 0) 基本校验（不抛异常，统一返回 {ok:false}）
-    if (!endpoints.length) return { ok: false, err: '没有启用的 AI API' };
+    if (!endpoints.length) return { ok: false, notConfigured: true, err: '没有启用的 AI API' };
     const validEndpoints = endpoints.filter((e) => !endpointError(e));
-    if (!validEndpoints.length) return { ok: false, err: endpoints.map((e) => `${e.name}：${endpointError(e)}`).join('；') };
+    if (!validEndpoints.length) return { ok: false, notConfigured: true, err: endpoints.map((e) => `${e.name}：${endpointError(e)}`).join('；') };
 
     const preparedJD = prepareAIJDText(job.jd, cfg);
     if (preparedJD.error) return { ok: false, inputIncomplete: true, err: preparedJD.error };
@@ -5344,7 +5409,7 @@
     // 2) 每日次数上限
     const s0 = loadStats();
     if ((s0.aiCalls || 0) >= (cfg.aiDailyLimit || 0)) {
-      return { ok: false, err: 'AI次数超限' };
+      return { ok: false, quotaExceeded: true, err: 'AI次数超限' };
     }
 
     // 3) 调用（含重试）。冻结本次规则，防止等待期间切换盲投后误用旧结论。
@@ -5356,22 +5421,17 @@
       ].join('\n\n') },
       { role: 'user', content: buildAIPrompt(job, preparedJD, cfg) },
     ];
-    const health = readAIHealth();
     const selected = opts?.endpointId ? validEndpoints.filter((e) => e.id === opts.endpointId) : validEndpoints;
     if (!selected.length) return { ok: false, err: '指定的 API 不存在、未启用或配置不完整' };
-    const candidates = opts?.bypassCache ? selected : selected.filter((e) => !(health[endpointHealthKey(e)]?.retryAt > Date.now()));
-    candidates.sort((a, b) => (health[endpointHealthKey(b)]?.lastSuccessAt || 0) - (health[endpointHealthKey(a)]?.lastSuccessAt || 0));
-    if (!candidates.length) {
-      return { ok: false, apiUnavailable: true, retryAt: Math.min(...selected.map((e) => health[endpointHealthKey(e)]?.retryAt || 0)),
-        err: '所有 AI API 暂时不可用，正在冷却；可在 AI 设置里测试连接或等待恢复' };
-    }
+    // 每轮始终按用户设置顺序完整巡检。历史成功与冷却记录只用于状态展示，
+    // 不得让主 API 被长期跳过；全部失败后的等待由 runAIGate 统一处理。
+    const candidates = selected;
     const errors = [];
-    // 优先切换其他接口；只有一个接口时沿用 aiMaxRetries 的有限重试。
-    const maxRetry = candidates.length === 1 ? Math.min(3, Math.max(0, cfg.aiMaxRetries ?? 1)) : 0;
     for (const endpoint of candidates) {
       let lastResult;
-      for (let i = 0; i <= maxRetry; i++) {
-      if (aiOperationStopped(cfg)) return { ok: false, err: '已停止' };
+      if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+      while (!testingDraft && state.paused && !aiOperationStopped(cfg)) await sleep(300);
+      if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
       if (!testingDraft && aiCacheFingerprint() !== requestFingerprint) {
         return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
       }
@@ -5394,14 +5454,21 @@
       } else {
         lastResult = { ...r, err: safeAIError(r.err, cfg) };
       }
-      if (!lastResult.retryable) break;
-      if (i < maxRetry) await sleep(1500 + randInt(0, 800));
-      }
       markAIEndpoint(endpoint, lastResult || { ok: false, err: '请求失败' }, cfg);
       errors.push(`${endpoint.name}：${lastResult?.err || '请求失败'}${lastResult?.transport ? `（通道:${lastResult.transport}）` : ''}`);
-      if (candidates.length > 1) addLog(`AI API ${endpoint.name} 不可用，自动尝试下一个接口`, 'err');
+      if (endpoint !== candidates.at(-1)) addLog(`AI API ${endpoint.name} 不可用，自动尝试下一个接口`, 'err');
     }
-    return { ok: false, apiUnavailable: true, err: errors.join('；') || 'AI 调用失败' };
+    // 最后一项请求结束后再等足一分钟，下一轮重新尝试所有已启用完整接口。
+    const retryAt = Date.now() + AI_RETRY_DELAY_MS;
+    const health = readAIHealth();
+    for (const endpoint of candidates) {
+      const key = endpointHealthKey(endpoint);
+      if (health[key]) health[key].retryAt = retryAt;
+    }
+    writeAIHealth(health);
+    try { renderAIEndpointHealth(); } catch (_) {}
+    return { ok: false, apiUnavailable: true, retryAt, retryDelayMs: AI_RETRY_DELAY_MS,
+      err: errors.join('；') || 'AI 调用失败' };
   }
 
   // 面板「🧪 测试 AI 连接」：分别试 GM / fetch 两条通道，明确告诉用户哪条能通
@@ -5550,8 +5617,8 @@
     refreshBgState();
     if (cfg.aiEnabled) {
       const endpoints = getAIEndpoints(cfg);
-      addLog(`🤖 AI 筛选已开启 | ${endpoints.length} 个已启用 API，自动切换 | 上限 ${cfg.aiDailyLimit} 次/日（含失败与重试） | 降级 ${cfg.aiFallback} | 缓存 ${cfg.aiCacheEnabled ? '开' : '关'}`);
-      if (!endpoints.some((e) => !endpointError(e))) addLog('⚠ 没有配置完整且已启用的 API：将按所选降级策略处理', 'err');
+      addLog(`🤖 AI 筛选已开启 | ${endpoints.length} 个已启用 API，按顺序切换，全部失败一分钟后重试 | 上限 ${cfg.aiDailyLimit} 次/日（含失败与重试） | 缓存 ${cfg.aiCacheEnabled ? '开' : '关'}`);
+      if (!endpoints.some((e) => !endpointError(e))) addLog('⚠ 没有配置完整且已启用的 API：将复核全部本地条件', 'err');
       if (!String(cfg.aiUserPortrait || '').trim()) addLog('⚠ 未填求职画像：AI 判断会更保守，建议填写', 'err');
       // v1.0.11：画像写着"应届/校招"，但「规则设置 → 年限」还是 ≥N 年 —— 两组标准互相矛盾，
       // AI 遇到校招岗会左右互搏，最典型的产物就是"不符正式校招流程 / 风险高"这类推测性理由。
@@ -5753,16 +5820,37 @@
     ].filter((x) => x !== undefined).join('\n');
   }
 
-  /**
-   * AI 闸门：活跃度检查通过后调用，排除词由 AI 按上下文判断。
-   * 返回 {action:'accept'|'reject'|'skip'|'stop', ...}
-   *  - accept  继续投递（degraded=true 表示 AI 失败后按本地规则放行）
-   *  - reject  AI 判定不匹配
-   *  - skip    AI 失败且降级策略=跳过，或回退本地时命中排除词
-   *  - stop    用户停止
-   */
+  // 接口暂时不可用时保留当前岗位，每分钟重新巡检，暂停/停止/修改配置即时生效。
+  async function waitForAIRetry(card, job, fingerprint, retryAt) {
+    const countdown = panel?.querySelector('.bh-cd');
+    const requestLimit = countValue(getAIConfig().aiDailyLimit);
+    try {
+      while (!state.stopFlag) {
+        if (anyRisk(checkRisk())) {
+          state._lastRisk = describeRisk(checkRisk());
+          stop('AI 等待期间检测到风控：' + state._lastRisk);
+          return false;
+        }
+        if (!state.paused) {
+          if (aiCacheFingerprint() !== fingerprint || countValue(getAIConfig().aiDailyLimit) !== requestLimit
+              || Date.now() >= retryAt) return true;
+          const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+          if (card?.isConnected) tagCard(card, 'pending', `AI 接口不可用，${seconds} 秒后重试全部接口`);
+          if (countdown) { countdown.style.display = 'block'; countdown.textContent = `🤖 ${seconds}s 后重试全部 AI 接口`; }
+        } else if (countdown) countdown.style.display = 'none';
+        await sleep(300);
+      }
+      return false;
+    } finally {
+      if (countdown) countdown.style.display = 'none';
+    }
+  }
+
+  /** AI 优先；完整接口暂时不可用时持续重试，未配置或关闭 AI 时复核全部本地条件。 */
   async function runAIGate(card, job) {
     while (true) {
+      if (state.stopFlag) return { action: 'stop' };
+      while (state.paused && !state.stopFlag) await sleep(300);
       if (state.stopFlag) return { action: 'stop' };
       if (!getAIConfig().aiEnabled) {
         const cfg = getAIConfig();
@@ -5772,9 +5860,12 @@
           policyFingerprint: aiCacheFingerprint(cfg) };
       }
 
+      const requestedPolicy = aiCacheFingerprint();
       const ai = await aiScreen(job);
+      // 用户暂停时请求可能仍返回；保留结论和岗位，恢复后再校验规则并消费结果。
+      while (state.paused && !state.stopFlag) await sleep(300);
       if (state.stopFlag) return { action: 'stop' };
-      if (ai.policyChanged) {
+      if (ai.policyChanged || aiCacheFingerprint() !== requestedPolicy) {
         addLog('筛选规则已变化，重新判断该职位：' + (job.title || ''));
         continue;
       }
@@ -5801,46 +5892,31 @@
         };
       }
 
-      // ---- AI 失败：读取最新设置，避免暂停期间修改规则后仍用旧排除词复核 ----
+      if (ai.cancelled) return { action: 'stop' };
       const cfg = getAIConfig();
+      if (ai.notConfigured) {
+        const localCfg = { ...cfg, aiEnabled: false };
+        const local = matchJob(jobMatchText(job), job.activeText, job.salary, localCfg, {}, job);
+        const reason = local.matched ? '未配置可用 AI，本地规则复核通过' : local.reason;
+        addLog(`${local.matched ? '✓' : '✗'} ${job.title || ''} | ${reason}`, local.matched ? 'info' : 'skip');
+        return { action: local.matched ? 'accept' : 'skip', local: true,
+          reason, details: local.details, policyFingerprint: aiCacheFingerprint(cfg) };
+      }
+
       state._aiFailStreak = (state._aiFailStreak || 0) + 1;
       if (state._aiFailStreak >= 3) {
         flashAIError(); // 状态点闪烁提醒（不停止运行）
         if (!state._aiWarned) {
           state._aiWarned = true;
           addLog(`🚨 AI 已连续失败 ${state._aiFailStreak} 次（${ai.err}）。请检查 Key / 接口 / 网络，或先关掉 AI 开关。`, 'err',
-            '连续 3 次 AI 失败说明配置大概率有问题：\n1. 接口地址要带 /chat/completions\n2. Key 是否有效、余额是否充足\n3. 模型名是否被该网关支持\n4. 是否需要代理放行该域名\n\n接下来按所选降级策略处理。');
+            '请检查接口、Key、模型、域名权限和网络。当前岗位保留，一分钟后重试全部接口；关闭 AI 后使用本地规则。');
         }
       }
 
-      if (cfg.aiFallback === 'skip') {
-        addLog(`✗ AI失败(${ai.err})，跳过：${job.title || ''}`, 'err');
-        return { action: 'skip', err: ai.err, reason: 'AI 失败：' + ai.err };
-      }
-
-      if (cfg.aiFallback === 'pause') {
-        addLog(`⏸ AI失败(${ai.err})，已暂停。点面板主按钮「继续」恢复`, 'err');
-        state.paused = true;
-        setStatus('paused');
-        // 原地等待人工恢复（不消耗卡片、不滚动、不点击）
-        while (state.paused && !state.stopFlag) await sleep(300);
-        if (state.stopFlag) return { action: 'stop' };
-        setStatus('running');
-        addLog('▶ 已恢复，重新判断该职位');
-        continue; // 重新走一次 AI
-      }
-
-      // AI 模式已把排除词推迟到此处；失败回退时必须补上原有的字面检查。
-      const jd = jobMatchText(job);
-      const hit = findMustNotHit(jd, cfg);
-      if (hit) {
-        const reason = 'AI 失败，回退字面匹配：命中排除词：' + hit.hitWord;
-        addLog(`✗ ${job.title || ''} | ${reason} ← 出处：「${hit.hitContext}」`, 'skip',
-          `AI 错误：${ai.err}\n本次未取得 AI 语义结论，按本地排除词处理。\n${hit.hitContext}`);
-        return { action: 'skip', degraded: true, err: ai.err, reason, details: hit };
-      }
-      addLog(`⚠ AI失败(${ai.err})，本地排除词复核通过：${job.title || ''}`, 'err');
-      return { action: 'accept', degraded: true, err: ai.err, reason: 'AI 失败，本地排除词复核通过', policyFingerprint: aiCacheFingerprint(cfg) };
+      addLog(`⏳ ${ai.quotaExceeded ? 'AI 请求额度不可用' : '全部 AI 接口不可用'}（${ai.err}），保留当前岗位，一分钟后重试全部接口：${job.title || ''}`, 'err');
+      const retryAt = ai.retryAt || Date.now() + 60000;
+      if (!await waitForAIRetry(card, job, aiCacheFingerprint(cfg), retryAt)) return { action: 'stop' };
+      addLog('▶ 重新判断当前职位：' + (job.title || ''));
     }
   }
 
@@ -5879,16 +5955,17 @@
   function cardStillMatches(card, expected) {
     if (!card?.isConnected) return isDetailPage() && !!expected.jobId && publicJobId(location.href) === expected.jobId;
     const current = readJobCard(card);
-    if (expected.jobId && expected.jobId !== current.jobId || expected.dataJobId && expected.dataJobId !== current.dataJobId) return false;
-    return !!current.title && matchSnapshotIdentity(current, expected).ok;
+    const identity = matchSnapshotIdentity(current, expected);
+    // 同岗位重渲染可改变公开链接/data 属性的表示；已知 ID 仍须有直接或别名匹配。
+    return !!current.title && identity.ok && (!(expected.jobId || expected.dataJobId) || identity.strength >= 3);
   }
 
   function snapshotStillCurrent(snapshot, expected, expectedJob, card) {
     if (state.stopFlag || state.paused) return false;
     const current = extractJobSnapshot(expected);
     if (!current.ok || current.fingerprint !== snapshot.fingerprint) return false;
-    if (expected?.jobId && current.selectedJobId && expected.jobId !== current.selectedJobId) return false;
-    if (expected?.dataJobId && current.selectedDataJobId && expected.dataJobId !== current.selectedDataJobId) return false;
+    const selected = selectedCardIdentity();
+    if (selected && expected && matchSnapshotIdentity(selected, expected).conflict) return false;
     if (expectedJob) {
       const liveCard = card?.isConnected ? readJobCard(card) : expected || {};
       if (aiJobFingerprint(jobFromSnapshot(current, liveCard)) !== aiJobFingerprint(expectedJob)) return false;
@@ -5990,13 +6067,10 @@
     const expected = context.identity;
     // 提交前已经验证完整 JD。回执只核对岗位身份，背景被弹窗隐藏或正文刷新不等于换岗。
     const identities = [selectedCardIdentity(), extractJobSnapshot(context.expected),
-      ...context.roots.filter((root) => root.isConnected).map((root) => scopeJobIdentity(root, false, true))];
+      ...context.roots.filter((root) => root.isConnected).map((root) => scopeJobIdentity(root, false, true, [expected.jobId]))];
     return !identities.filter(Boolean).some((identity) => {
-      if (identity.ambiguous || expected.jobId && identity.jobId && expected.jobId !== identity.jobId
-        || expected.dataJobId && identity.dataJobId && expected.dataJobId !== identity.dataJobId) return true;
-      const sameId = expected.jobId && identity.jobId === expected.jobId
-        || expected.dataJobId && identity.dataJobId === expected.dataJobId;
-      return !sameId && identity.title && !identityTextMatches(identity.title, expected.title);
+      // 回执可使字段隐藏/清空；明确冲突仍拦截，缺少字段不等于换岗。
+      return !!matchSnapshotIdentity(identity, expected).conflict;
     });
   }
   function readOfficialContactResult(context) {
@@ -6089,10 +6163,10 @@
     const check = async () => {
       timer = null;
       if (disposed) return;
-      const identity = scopeJobIdentity(card, true, true), expected = result.context.identity;
+      const expected = result.context.identity;
+      const identity = scopeJobIdentity(card, true, true, [expected.jobId]);
       if (!card.isConnected || !card.querySelector('.bh-tag-pending')
-        || identity.jobId && expected.jobId && identity.jobId !== expected.jobId
-        || identity.dataJobId && expected.dataJobId && identity.dataJobId !== expected.dataJobId) { cleanup(); return; }
+        || matchSnapshotIdentity(identity, expected).conflict) { cleanup(); return; }
       const late = readOfficialContactResult(result.context);
       if (!late) return;
       cleanup();
@@ -6299,7 +6373,6 @@
       years: state.config.yearsMin || 0, edu: state.config.eduMin || 0,
     };
     let decisionPolicy = aiCacheFingerprint();
-    let decisionFallback = null;
     const result = matchJob(jd, activeText, sal, state.config, vars, job);
 
     if (!result.matched) {
@@ -6362,8 +6435,8 @@
         return;
       }
       decisionPolicy = gate.policyFingerprint;
-      decisionFallback = gate.degraded ? 'local' : null;
-      const currentResult = matchJob(jd, activeText, sal, state.config, vars, job);
+      const currentResult = matchJob(jd, activeText, sal,
+        gate.local ? { ...state.config, aiEnabled: false } : state.config, vars, job);
       if (!currentResult.matched || decisionPolicy !== aiCacheFingerprint()) {
         notSent(currentResult.matched ? '筛选规则已变化，本次结论已作废' : currentResult.reason);
         return;
@@ -6386,8 +6459,7 @@
     }
 
     // ===== 匹配通过：按钮必须属于刚才读取并判断的同一份职位详情 =====
-    const rulesStillCurrent = () => decisionPolicy === aiCacheFingerprint()
-      && (!decisionFallback || getAIConfig().aiFallback === decisionFallback);
+    const rulesStillCurrent = () => decisionPolicy === aiCacheFingerprint();
     let chatBtn = null;
     for (let i = 0; i < 20; i++) {
       if (!state.config.autoSend || !rulesStillCurrent() || !cardStillMatches(card, expected) || !snapshotStillCurrent(snapshot, expected, job, card)) {
@@ -6528,7 +6600,6 @@
     const cfg = state.config;
     const vars = { company: job.company || '贵公司', title: job.title, years: cfg.yearsMin || 0, edu: cfg.eduMin || 0 };
     let decisionPolicy = aiCacheFingerprint(cfg);
-    let decisionFallback = null;
     const result = matchJob(jobMatchText(job), job.activeText, job.salary, cfg, vars, job);
     addLog('详情页已确认：' + job.title + ' | 正文 ' + snapshot.description.length + ' 字', 'info', snapshotDiagnostic(snapshot));
     if (!result.matched) {
@@ -6545,8 +6616,8 @@
         return 'skipped';
       }
       decisionPolicy = gate.policyFingerprint;
-      decisionFallback = gate.degraded ? 'local' : null;
-      const currentResult = matchJob(jobMatchText(job), job.activeText, job.salary, state.config, vars, job);
+      const currentResult = matchJob(jobMatchText(job), job.activeText, job.salary,
+        gate.local ? { ...state.config, aiEnabled: false } : state.config, vars, job);
       if (!currentResult.matched || decisionPolicy !== aiCacheFingerprint()) {
         addLog('详情页未执行沟通：' + (currentResult.matched ? '筛选规则已变化，本次结论已作废' : currentResult.reason), 'skip');
         return 'skipped';
@@ -6564,8 +6635,7 @@
       return 'skipped';
     }
 
-    const rulesStillCurrent = () => decisionPolicy === aiCacheFingerprint()
-      && (!decisionFallback || getAIConfig().aiFallback === decisionFallback);
+    const rulesStillCurrent = () => decisionPolicy === aiCacheFingerprint();
     let btn = null;
     for (let i = 0; i < 60; i++) {
       if (!allowed() || !rulesStillCurrent() || !snapshotStillCurrent(snapshot, expected, job)) {

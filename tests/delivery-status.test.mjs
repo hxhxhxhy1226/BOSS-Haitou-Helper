@@ -69,6 +69,76 @@ test('本次新出现的可见官方成功弹窗可以确认，并只定位该�
   assert.equal(result.stay, stay);
 });
 
+function mountSelectedCard(f, { publicLink = true, dataJobId = JOB.dataJobId } = {}) {
+  const list = f.doc.createElement('ul');
+  list.className = 'job-list-wrapper';
+  list.innerHTML = `<li class="job-card-box active" data-jobid="${dataJobId}">
+    ${publicLink ? `<a class="job-name" href="/job_detail/${JOB.jobId}.html">${JOB.title}</a>` : `<span class="job-name">${JOB.title}</span>`}
+    <a class="company-name" href="/gongsi/fixture.html">${JOB.company}</a><span class="job-salary">20-30K</span></li>`;
+  f.doc.body.prepend(list);
+  return list.firstElementChild;
+}
+
+test('无公开链接卡片的加密 data ID 与数字详情 ID 可完成一次点击、官方确认及关框', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t);
+  const card = mountSelectedCard(f, { publicLink: false, dataJobId: JOB.jobId });
+  const expected = f.BH.readJobCard(card), snapshot = f.BH.extractJobSnapshot(expected);
+  assert.equal(expected.jobId, '');
+  assert.equal(expected.dataJobId, JOB.jobId);
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  const job = f.BH.jobFromSnapshot(snapshot, expected);
+  const slot = await f.BH.reserveDelivery(job.jobId, 10);
+  let clicks = 0, notice;
+  f.button.addEventListener('click', () => { clicks++; notice = f.addNotice('已向BOSS发送消息'); });
+  const result = await f.BH.performOfficialContact(f.button, expected,
+    () => f.BH.snapshotStillCurrent(snapshot, expected, job, card), slot);
+  assert.equal(clicks, 1);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.dialogClosed, true);
+  assert.equal(notice.isConnected, false);
+  assert.equal(f.BH.loadStats().sent, 1);
+  assert.equal(f.BH.loadStats().pending, 0);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('详情无公开链接且页头 data 是公开别名，成功框隐藏原详情后仍确认并关闭', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), card = mountSelectedCard(f);
+  f.doc.querySelector('.job-detail-link').remove();
+  f.doc.querySelector('.job-banner').setAttribute('data-job-id', JOB.jobId);
+  const expected = f.BH.readJobCard(card), snapshot = f.BH.extractJobSnapshot(expected);
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.equal(snapshot.jobId, JOB.jobId);
+  assert.equal(snapshot.dataJobId, JOB.dataJobId);
+  const job = f.BH.jobFromSnapshot(snapshot, expected);
+  const slot = await f.BH.reserveDelivery(job.jobId, 10);
+  let clicks = 0, notice;
+  f.button.addEventListener('click', () => {
+    clicks++;
+    f.doc.querySelector('.job-detail').hidden = true;
+    notice = f.addNotice('已向BOSS发送消息');
+  });
+  const result = await f.BH.performOfficialContact(f.button, expected,
+    () => f.BH.snapshotStillCurrent(snapshot, expected, job, card), slot);
+  assert.equal(clicks, 1);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.dialogClosed, true);
+  assert.equal(notice.isConnected, false);
+  assert.equal(f.BH.loadStats().sent, 1);
+  assert.equal(f.BH.loadStats().pending, 0);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('公开别名兼容不能掩盖真实内部 ID 冲突或同标题其他公开 ID', async (t) => {
+  const f = await fixture(t), card = mountSelectedCard(f);
+  const before = f.context();
+  f.addNotice('已向BOSS发送消息');
+  card.dataset.jobid = '999999';
+  assert.equal(f.BH.readOfficialContactResult(before), null, '公开 ID 相同但数字内部 ID 不同仍拒绝');
+  card.dataset.jobid = JOB.dataJobId;
+  card.querySelector('.job-name').href = '/job_detail/otherPublicJob.html';
+  assert.equal(f.BH.readOfficialContactResult(before), null, '标题公司相同但公开 ID 不同仍拒绝');
+});
+
 function customSuccessDialog(f) {
   const dialog = f.doc.createElement('section');
   dialog.className = 'greet-dialog';

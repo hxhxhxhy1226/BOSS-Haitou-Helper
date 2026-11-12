@@ -53,7 +53,7 @@ const detail = `<section class="job-detail" data-jobid="fixture01"><header class
 const fixture = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>独立扩展本地验收</title>
   <style>body{font:16px/1.6 sans-serif;background:#eef3f8;padding:24px;color:#223} .job-list-wrapper{width:330px;padding:20px;background:#fff} main{margin-left:380px;max-width:420px} .op-btn-chat{display:inline-block;padding:12px;background:#00bca4;color:white} .job-sec-text{padding:16px 0} a{cursor:pointer} .contact-completed-overlay{position:fixed;inset:0;z-index:2000;background:#0006;display:flex;align-items:center;justify-content:center}.contact-completed-box{width:500px;background:white;padding:28px;border-radius:16px}.contact-completed-preview{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#f5f5f5;padding:10px}.contact-completed-footer{display:flex;gap:12px;justify-content:flex-end;margin-top:24px}.contact-completed-footer button{padding:10px 16px}</style>
   <h1>Edge 独立扩展验收 · 本地模拟职位</h1><p>无油猴、无真实账号；网站请求全部由本地测试接管。</p>
-  <ul class="job-list-wrapper"><li class="job-card-box" data-jobid="fixture01"><a class="job-name" href="/job_detail/extensionFixture.html">嵌入式软件工程师</a><span class="job-salary">20-30K</span><ul class="tag-list"><li>本科</li><li>3-5年</li></ul><a class="company-name" href="/gongsi/fixture.html">本地测试公司</a><div class="job-card-footer"><span class="time">刚刚活跃</span></div></li></ul>
+  <ul class="job-list-wrapper"><li class="job-card-box" data-jobid="extensionFixture"><a class="job-name" href="/job_detail/extensionFixture.html">嵌入式软件工程师</a><span class="job-salary">20-30K</span><ul class="tag-list"><li>本科</li><li>3-5年</li></ul><a class="company-name" href="/gongsi/fixture.html">本地测试公司</a><div class="job-card-footer"><span class="time">刚刚活跃</span></div></li></ul>
   <main id="detail-host">${detail}</main><script>
   window.fixtureClicks=0; window.fixtureReplacements=0; window.fixtureClickedGeneration=0;
   window.fixtureStayClicks=0; window.fixtureContinueClicks=0; window.fixtureDialogClosed=false;
@@ -193,7 +193,7 @@ try {
   await send('Page.navigate', { url: 'https://www.zhipin.com/web/geek/job?extension-local-test' }, page);
   await until(() => evaluate(page, "!!document.querySelector('#boss-helper-panel')"));
   check(await evaluate(page, 'fixtureClicks===0 && typeof window.GM_getValue === "undefined" && typeof window.BH === "undefined"'), '内容脚本独立注入，无油猴全局，默认不投递');
-  await evaluate(page, `(()=>{const field=k=>document.querySelector('[data-cfg="'+k+'"]'); for(const [k,v] of Object.entries({mustHave:'',mustNot:'',yearsMin:0,eduMin:0,salaryMin:0,activeDays:0,minDelay:0.5,maxDelay:0.5,dailyLimit:1,maxRounds:1,batchPauseSec:0})){field(k).value=v;} field('autoScroll').checked=false;field('autoSend').checked=true;document.querySelector('[data-act="save"]').click();})()`);
+  await evaluate(page, `(()=>{const field=k=>document.querySelector('[data-cfg="'+k+'"]'); for(const [k,v] of Object.entries({mustHave:'MCU',mustNot:'',yearsMin:0,eduMin:0,salaryMin:0,activeDays:0,minDelay:0.5,maxDelay:0.5,dailyLimit:1,maxRounds:1,batchPauseSec:0})){field(k).value=v;} field('autoScroll').checked=false;field('autoSend').checked=true;document.querySelector('[data-act="save"]').click();})()`);
   await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.dailyLimit===1)"));
   check(await evaluate(page, "localStorage.getItem('boss_helper_config_v1')===null"), '配置保存在扩展存储，网站 localStorage 不含配置');
   await evaluate(page, "document.querySelector('[data-act=toggle]').click()");
@@ -204,7 +204,7 @@ try {
   check(await evaluate(page, "fixtureDialogClosed && fixtureStayClicks===1 && fixtureContinueClicks===0 && !document.querySelector('.contact-completed-overlay') && !document.querySelector('#detail-host').hasAttribute('aria-hidden')"), '只点击留在此页并等待成功框异步关闭，不进入继续沟通');
   await until(() => evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).some(x=>x?.kind==='sent'&&x.status==='dispatched'&&x.clickPending===false&&x.clickedAt>0))"));
   const sent = await evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).filter(x=>x?.kind==='sent'&&x.status==='dispatched').length)");
-  check(sent === 1, '模拟岗位经筛选后仅点击一次，后台已持久化额度，官方回执识别成功');
+  check(sent === 1, '离线MCU条件命中STM32，公开ID属性与数字内部ID混用仍正确投递一次并确认回执');
   const bossTabId = await evaluate(workerSession, "chrome.tabs.query({}).then(t=>t.find(x=>x.url?.includes('extension-local-test')).id)");
   let status = await evaluate(workerSession, `chrome.tabs.sendMessage(${bossTabId},{type:'BH_UI',action:'stop'})`);
   check(status.ok && !status.running, '工具栏停止消息能控制真实内容脚本');

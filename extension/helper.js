@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.6 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.7 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -745,10 +745,15 @@
   }
 
   function selectedCardIdentity() {
-    const cards = [...document.querySelectorAll(JOB_CARD_SEL)].filter((card) => isReadableElement(card)
-      && (card.matches('.active, .selected, [aria-selected="true"]') || card.querySelector(':scope > .card-area.active, :scope > .card-area.selected')));
-    const outer = cards.filter((card) => !cards.some((other) => other !== card && other.contains(card)));
-    return outer.length === 1 ? readJobCard(outer[0]) : null;
+    // Selected styling may live several levels inside a card. Read the complete
+    // outer card so its company, ID and footer do not disappear from the identity.
+    const innerSelected = '.card-area.active, .card-area.selected, .card-area[aria-selected="true"], '
+      + '.job-card-body.active, .job-card-body.selected, .job-card-body[aria-selected="true"], '
+      + '.job-title.active, .job-title.selected, .job-title[aria-selected="true"], '
+      + '.job-name.active, .job-name.selected, .job-name[aria-selected="true"]';
+    const cards = collectJobCards().filter((card) => isReadableElement(card)
+      && (card.matches('.active, .selected, [aria-selected="true"]') || card.querySelector(innerSelected)));
+    return cards.length === 1 ? readJobCard(cards[0]) : null;
   }
 
   // 页头/选中态可能早于正文更新。保留正文最后观察到的所属岗位，不能用新 ID
@@ -977,6 +982,7 @@
     try {
     while (Date.now() <= deadline) {
       if (state.stopFlag) return { ok: false, stopped: true, reason: '已停止读取详情' };
+      if (options.stillAllowed && !options.stillAllowed()) return { ok: false, cancelled: true, reason: '切换条件已变化，取消读取详情' };
       if (state.paused) {
         const pausedAt = Date.now();
         while (state.paused && !state.stopFlag) await sleep(pollMs);
@@ -2135,26 +2141,62 @@
     }
   }
 
-  function getJobCardClickTarget(card) {
-    if (!card?.isConnected) return null;
-    const excluded = '.bh-tag, #boss-helper-panel, #bh-detail-modal, #bh-ai-modal, '
-      + '.company-name, .company-info, .op-btn-chat, .btn-startchat, '
-      + '.btn-send-message, [class*="collect"], [class*="favorite"], a[href*="/gongsi/"], a[href*="/chat/"]';
-    const usable = (node) => node && card.contains(node) && isVisible(node) && !node.closest(excluded);
-    // Site selection listeners live on the inner card body. Dispatching on the outer
-    // list item never reaches its descendants, even when the pointer is over them.
-    for (const selector of ['.card-area', '.job-card-body', '.job-card-content', '.job-card-info']) {
-      const nodes = [...(card.matches(selector) ? [card] : []), ...card.querySelectorAll(selector)];
-      const target = nodes.find(usable);
-      if (target) return target;
-    }
+  const JOB_CARD_CLICK_EXCLUDED = '.bh-tag, #boss-helper-panel, #bh-detail-modal, #bh-ai-modal, '
+    + '.company-name, .company-info, .op-btn-chat, .btn-startchat, .btn-send-message, '
+    + '[class*="collect"], [class*="favorite"], a[href*="/gongsi/"], a[href*="/chat/"]';
+
+  function usableJobCardClickTarget(card, node) {
+    return !!node?.isConnected && card.contains(node) && isVisible(node)
+      && !node.closest(JOB_CARD_CLICK_EXCLUDED);
+  }
+
+  function getJobCardClickTargets(card) {
+    if (!card?.isConnected) return [];
+    const targets = [];
+    const add = (node) => { if (usableJobCardClickTarget(card, node) && !targets.includes(node)) targets.push(node); };
+    // A deepest title hit bubbles through title/body/link/list-item listeners.
+    // Clicking a card-area itself cannot reach any listener on its descendants.
     for (const selector of SEL.jobTitle) {
-      const nodes = [...(card.matches(selector) ? [card] : []), ...card.querySelectorAll(selector)];
-      const target = nodes.find(usable);
-      if (target) return target;
+      const titles = [...(card.matches(selector) ? [card] : []), ...card.querySelectorAll(selector)];
+      for (const title of titles) {
+        if (!usableJobCardClickTarget(card, title)) continue;
+        const leaves = [...title.querySelectorAll('span, em, strong, b')].filter((node) =>
+          !node.querySelector('span, em, strong, b') && /[\p{L}\p{N}]/u.test(node.textContent || ''));
+        leaves.forEach(add);
+        add(title);
+      }
     }
-    const link = [...card.querySelectorAll('a[href*="/job_detail/"]')].find(usable);
-    return link || (usable(card) ? card : null);
+    for (const link of card.querySelectorAll('a[href*="/job_detail/"]')) add(link);
+    for (const selector of ['.job-card-body', '.job-card-content', '.job-card-info', '.job-info', '.card-area']) {
+      if (card.matches(selector)) add(card);
+      for (const node of card.querySelectorAll(selector)) add(node);
+    }
+    add(card);
+    return targets;
+  }
+
+  function getJobCardClickTarget(card) {
+    return getJobCardClickTargets(card)[0] || null;
+  }
+
+  function jobCardPointerTarget(card, target, x, y) {
+    if (typeof document.elementFromPoint !== 'function') return target;
+    const hit = document.elementFromPoint(x, y);
+    return usableJobCardClickTarget(card, hit) ? hit : null;
+  }
+
+  function jobCardPointerPoint(card, target, rect) {
+    const midY = rect.top + rect.height / 2;
+    const points = [
+      [rect.left + rect.width / 2, midY],
+      [rect.left + Math.min(80, rect.width / 4), midY],
+      [rect.left + Math.min(12, rect.width / 8), midY],
+    ];
+    for (const [x, y] of points) {
+      const hit = jobCardPointerTarget(card, target, x, y);
+      if (hit) return { x, y };
+    }
+    return null;
   }
 
   async function humanClick(el, stillValid, beforePointerDown, options = {}) {
@@ -2164,40 +2206,154 @@
     await sleep(randInt(300, 700));
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
-    const tx = r.left + r.width / 2 + randInt(-5, 5);
-    const ty = r.top  + r.height / 2 + randInt(-3, 3);
+    const cardPoint = options.card && jobCardPointerPoint(options.card, el, r);
+    if (options.card && !cardPoint) return false;
+    const tx = cardPoint ? cardPoint.x : r.left + r.width / 2 + randInt(-5, 5);
+    const ty = cardPoint ? cardPoint.y : r.top + r.height / 2 + randInt(-3, 3);
     await simulateMouse(tx, ty, randInt(10, 20));
     await sleep(randInt(200, 500));
     // 去掉 view：油猴沙箱下 view: window 会被 Chrome 类型校验拒绝
     if (!allowed()) return false;
+    const target = options.card ? jobCardPointerTarget(options.card, el, tx, ty) : el;
+    if (!target) return false;
     const o = { bubbles: true, cancelable: true, clientX: tx, clientY: ty, button: 0 };
-    if (beforePointerDown && await beforePointerDown() === false) return false;
+    if (beforePointerDown && await beforePointerDown(target) === false) return false;
     if (!allowed()) return false;
-    el.dispatchEvent(new MouseEvent('mouseover', o));
-    el.dispatchEvent(new MouseEvent('mousedown', o));
+    target.dispatchEvent(new MouseEvent('mouseover', o));
+    target.dispatchEvent(new MouseEvent('mousedown', o));
     await sleep(randInt(30, 100));
     if (!allowed()) return false;
-    el.dispatchEvent(new MouseEvent('mouseup', o));
+    if (!target.isConnected || options.card && !usableJobCardClickTarget(options.card, target)) return false;
+    target.dispatchEvent(new MouseEvent('mouseup', o));
     // Cancel only the anchor's native navigation after the site's handlers have
     // received the bubbled event. Card selection must not open a second tab.
     const preventNavigation = (event) => {
-      if (event.target === el && !event.isTrusted && (event.cancelBubble || event.currentTarget === window)) event.preventDefault();
+      if (event.target === target && !event.isTrusted && (event.cancelBubble || event.currentTarget === window)) event.preventDefault();
     };
     const navigationPath = [];
     if (options.preventDefaultNavigation) {
-      for (let node = el; node; node = node.parentNode) navigationPath.push(node);
+      for (let node = target; node; node = node.parentNode) navigationPath.push(node);
       navigationPath.push(window);
       // Observe each bubble stage without cancelling it early. If the site stops
       // propagation, cancel navigation after its handler at that same stage.
       for (const node of navigationPath) node.addEventListener('click', preventNavigation);
     }
-    try { el.dispatchEvent(new MouseEvent('click', o)); }
+    try { target.dispatchEvent(new MouseEvent('click', o)); }
     finally {
       if (options.preventDefaultNavigation) {
         for (const node of navigationPath) node.removeEventListener('click', preventNavigation);
       }
     }
     return true;
+  }
+
+  function jobSelectionAcknowledged(expected) {
+    const selected = selectedCardIdentity();
+    const selectedMatch = selected && matchSnapshotIdentity(selected, expected);
+    if (selectedMatch?.conflict) return false;
+    const needsId = !!(expected.jobId || expected.dataJobId);
+    if (selectedMatch?.ok && selectedMatch.strength >= (needsId ? 3 : 2)) return true;
+    const detail = extractJobSnapshot(expected);
+    return detail.ok && detail.identityStrength >= (needsId ? 3 : 2);
+  }
+
+  async function waitForJobSelection(expected, timeoutMs, stillAllowed) {
+    let deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline && !state.stopFlag) {
+      if (stillAllowed && !stillAllowed()) return false;
+      if (state.paused) {
+        const pausedAt = Date.now();
+        while (state.paused && !state.stopFlag) await sleep(100);
+        deadline += Date.now() - pausedAt;
+        continue;
+      }
+      if (jobSelectionAcknowledged(expected)) return true;
+      await sleep(60);
+    }
+    return false;
+  }
+
+  async function selectJobCard(card, options = {}) {
+    const expected = options.expected || readJobCard(card);
+    const key = jobCardKey(card);
+    const valid = () => !state.stopFlag && !!card?.isConnected && cardStillMatches(card, expected)
+      && (!options.stillAllowed || options.stillAllowed());
+    const prepared = state._preparedJobSelection;
+    state._preparedJobSelection = null;
+    if (!valid()) return { ok: false, stopped: state.stopFlag, reason: '卡片已变化或已停止' };
+    while (state.paused && !state.stopFlag) await sleep(100);
+    if (!valid()) return { ok: false, stopped: state.stopFlag, reason: '卡片已变化或已停止' };
+    if (prepared?.cardKey === key && snapshotStillCurrent(prepared, expected, null, card)
+        && jobSelectionAcknowledged(expected)) return prepared;
+    const current = extractJobSnapshot(expected);
+    if (current.ok && current.bodyConfirmed && !current.bodyPending && jobSelectionAcknowledged(expected)) return current;
+
+    const allTargets = getJobCardClickTargets(card);
+    // Keep fallbacks from distinct regions even if a highlighted title has many
+    // spans. A global slice could otherwise remove every body-area fallback.
+    const bodyTargets = allTargets.filter((node) => node.matches('.job-card-body, .job-card-content, .job-card-info, .job-info'));
+    const areaTarget = allTargets.find((node) => node.matches('.card-area'));
+    const publicLink = allTargets.find((node) => node.matches('a[href*="/job_detail/"]'));
+    const candidates = [...new Set([allTargets[0], ...bodyTargets.slice(0, 3), areaTarget, publicLink,
+      ...allTargets.slice(1, 3), card].filter(Boolean))].slice(0, 8);
+    const hits = new Set();
+    let previous = extractJobSnapshot();
+    for (const candidate of candidates) {
+      while (state.paused && !state.stopFlag) await sleep(100);
+      if (!valid()) return { ok: false, stopped: state.stopFlag, reason: '卡片已变化或已停止' };
+      if (!usableJobCardClickTarget(card, candidate)) continue;
+      let selection = null;
+      try {
+        const clicked = await humanClick(candidate,
+          () => valid() && usableJobCardClickTarget(card, candidate),
+          (hit) => {
+            if (hits.has(hit)) return false;
+            hits.add(hit);
+            previous = extractJobSnapshot();
+            selection = beginJobSelection(expected, previous);
+          }, { card, preventDefaultNavigation: true });
+        if (!valid()) return { ok: false, stopped: state.stopFlag, reason: '卡片已变化或已停止' };
+        if ((clicked || selection) && await waitForJobSelection(expected, options.ackTimeoutMs ?? 450, valid)) {
+          // Once selection is acknowledged, wait for its body without repeatedly
+          // clicking and restarting the same page transition.
+          return await waitForJobSnapshot(expected, { previous, selection, timeoutMs: options.timeoutMs ?? 8000, stillAllowed: valid });
+        }
+      } finally { selection?.cleanup(); }
+    }
+    return { ok: false, stopped: state.stopFlag, retryable: !state.stopFlag,
+      reason: candidates.length ? '卡片未实际切换到目标岗位，请稍后重试' : '未找到当前卡片的可点击区域' };
+  }
+
+  async function advanceToNextJobCard(completedKey) {
+    const allowed = () => {
+      if (!state.running || state.stopFlag || loadStats().sent >= state.config.dailyLimit) return false;
+      const risk = checkRisk();
+      if (anyRisk(risk)) { state._lastRisk = describeRisk(risk); stop('切换下一张时检测到风控：' + state._lastRisk); return false; }
+      return true;
+    };
+    if (!allowed() || state.paused || state._jobProcessing || state._detailProcessing) return false;
+    state._jobProcessing = true;
+    try {
+    const all = collectJobCards();
+    const completedIndex = all.findIndex((card) => jobCardKey(card) === completedKey);
+    const remaining = getUnprocessedJobCards();
+    const next = remaining.find((card) => all.indexOf(card) > completedIndex) || remaining[0];
+    if (!next) return false;
+    const expected = readJobCard(next);
+    addLog('→ 当前卡片处理结束，切换下一张：' + expected.title);
+    const snapshot = await selectJobCard(next, { expected, stillAllowed: allowed });
+    if (snapshot.ok && allowed()) {
+      state._preparedJobSelection = { ...snapshot, cardKey: jobCardKey(next) };
+      addLog('已切换并确认下一张：' + snapshot.title);
+      return true;
+    }
+    if (!snapshot.stopped && !snapshot.cancelled && allowed() && next.isConnected) {
+      tagCard(next, 'pending', '切换下一张尚未确认：' + snapshot.reason);
+      next.querySelector('.bh-tag').dataset.bhRetryable = '1';
+      addLog('下一张尚未就绪，将重新确认：' + snapshot.reason, 'info');
+    }
+    return false;
+    } finally { state._jobProcessing = false; }
   }
 
   function findScrollContainer() {
@@ -5458,7 +5614,7 @@
   // v1.1.5：允许嵌入式混合技术栈与明确可选校招方向，旧方向拒绝缓存作废。
   function aiCacheFingerprint(cfg) {
     cfg = cfg || getAIConfig();
-    return 'v116|' + stableAIHash({
+    return 'v117|' + stableAIHash({
       aiEnabled: cfg.aiEnabled === true,
       skipKeywordCheck: !!state.skipKeywordCheck,
       aiMaxJDChars: Number(cfg.aiMaxJDChars || 2500),
@@ -5756,6 +5912,7 @@
     finally { state._starting = false; }
     if (generation !== state._startGeneration) return;
     state._loopActive = true;
+    state._listRun = isListPage();
     try {
     state.running = true;
     state.stopFlag = false;
@@ -5763,6 +5920,7 @@
     state.round = 0;
     state._inBatch = 0;
     state._processedJobs = new Set();
+    state._preparedJobSelection = null;
     state._jobOutcomes = new Map();
     state._jobReadRetries = new Map();
     state._aiFailStreak = 0;
@@ -5857,6 +6015,7 @@
 
   function stop(reason) {
     state._startGeneration = (state._startGeneration || 0) + 1;
+    state._preparedJobSelection = null;
     if (state.stopFlag) return;
     state.stopFlag = true;
     state.running = false;
@@ -5942,6 +6101,7 @@
         if (processed) {
           state._jobReadRetries.delete(key);
           markJobCardProcessed(card, key);
+          await advanceToNextJobCard(key);
         }
         else if (!state.stopFlag && !state.paused) {
           const retries = (state._jobReadRetries.get(key) || 0) + 1;
@@ -5949,6 +6109,7 @@
           if (retries >= 3) {
             tagCard(card, 'not-sent', '岗位连续未就绪，可重新开始后重试');
             markJobCardProcessed(card, key);
+            await advanceToNextJobCard(key);
           } else addLog(`岗位尚未就绪，将重试（${retries}/3）`, 'info');
         }
         // 每处理 batchSize 张就停一会（防风控）
@@ -6523,26 +6684,7 @@
       return;
     }
     addLog(`→ 展开详情：${title} | 公司="${company}" | 职位ID="${expected.jobId || expected.dataJobId}"`);
-    let previous = extractJobSnapshot();
-    let selection = null;
-    const clickTarget = getJobCardClickTarget(card);
-    if (!clickTarget) {
-      tagCard(card, 'pending', '未找到当前卡片的可点击主体，稍后重试');
-      card.querySelector('.bh-tag').dataset.bhRetryable = '1';
-      return;
-    }
-    let clicked;
-    try {
-      clicked = await humanClick(clickTarget, () => !state.stopFlag && cardStillMatches(card, expected)
-        && getJobCardClickTarget(card) === clickTarget,
-        () => { previous = extractJobSnapshot(); selection = beginJobSelection(expected, previous); },
-        { preventDefaultNavigation: true });
-    } catch (error) { selection?.cleanup(); throw error; }
-    if (!clicked) { selection?.cleanup(); return; }
-
-    let snapshot;
-    try { snapshot = await waitForJobSnapshot(expected, { previous, selection }); }
-    finally { selection?.cleanup(); }
+    const snapshot = await selectJobCard(card, { expected });
     if (!snapshot.ok) {
       if (!snapshot.stopped) {
         if (card.isConnected && cardStillMatches(card, expected)) {
@@ -6778,7 +6920,7 @@
     if (native && !state.running) return 'skipped';
     const cfg = state.config || loadConfig();
     if (!isDetailPage() || !cfg.autoSend || state.stopFlag || state.paused
-      || state._jobProcessing || state._detailProcessing) return 'skipped';
+      || state._jobProcessing || state._detailProcessing || state._loopActive && state._listRun) return 'skipped';
     state._detailProcessing = true;
     if (!state.config) state.config = cfg;
     const ownsRunState = !state.running;
@@ -7074,7 +7216,8 @@
       readJobCard, extractJobSnapshot, waitForJobSnapshot, beginJobSelection, getDetailRoot, matchSnapshotIdentity,
       collectJobCards, jobCardKey, getUnprocessedJobCards, markJobCardProcessed, findScrollContainer, scrollToBottom, loadMore,
       collectActiveText, collectLiveBadges, publicJobId,
-      jobFromSnapshot, jobMatchText, snapshotDiagnostic, snapshotStillCurrent, snapshotChatButton, getJobCardClickTarget, humanClick, autoChatOnDetail,
+      jobFromSnapshot, jobMatchText, snapshotDiagnostic, snapshotStillCurrent, snapshotChatButton,
+      getJobCardClickTarget, getJobCardClickTargets, selectJobCard, advanceToNextJobCard, humanClick, autoChatOnDetail,
       // v1.0.15：HR 实时状态徽标的识别（只认逐字精确的那几个词）
       isLiveBadge,
       aiScreen, callLLM, buildAIPrompt, parseAIResult, cleanJDText, prepareAIJDText,

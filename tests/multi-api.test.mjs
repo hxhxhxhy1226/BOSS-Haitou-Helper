@@ -254,7 +254,7 @@ test('升级后不沿用 v21 的旧拒绝缓存，重新取得当前 AI 结论',
   const target = job('old-refusal-cache');
   f.BH.setAICache(target.jobId, { match: false, score: 0, reason: '旧版本错误拒绝' }, target);
   const cached = f.store.get('boss_helper_ai_cache_v1');
-  cached[target.jobId].pf = cached[target.jobId].pf.replace(/^v114\|/, 'v21|');
+  cached[target.jobId].pf = cached[target.jobId].pf.replace(/^v\d+\|/, 'v21|');
   f.store.set('boss_helper_ai_cache_v1', cached);
   f.win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(cached));
   const result = await f.BH.aiScreen(target);

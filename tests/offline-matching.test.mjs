@@ -66,6 +66,28 @@ test('offline C, C++, C# and unrelated English substrings remain distinct', asyn
   assert.equal(f.match('负责 Cortex M4 软件开发', f.config({ mustHave: ['ARM'] })).matched, true);
 });
 
+test('offline accepts mixed MCU/RTOS and embedded Linux campus work when technical slots meet the threshold', async (t) => {
+  const f = await fixture(t);
+  const jd = [
+    '机器人嵌入式软件工程师（校招）',
+    '参与机器人控制器及传感器嵌入式软件开发，负责MCU/SoC底层驱动、实时任务及通信协议。',
+    '参与CAN、UART、SPI、I2C接口联调，熟悉C/C++和嵌入式系统基础。',
+    '了解STM32、ARM、RTOS或嵌入式Linux中的至少一种平台。',
+  ].join('\n');
+  const cfg = f.config({ mustHave: ['MCU', 'RTOS', 'Linux', 'C/C++'], mustHaveMin: 4,
+    mustNot: ['外包', '销售', '培训'], yearsMin: 0, eduMin: 2, salaryMin: 14 });
+  const result = f.match(jd, cfg, { experience: '在校/应届', education: '本科' });
+  assert.equal(result.matched, true, result.reason);
+  assert.equal(result.details.mustHaveHit, 4, 'Linux and RTOS coexist without imposing an extra direction veto');
+  assert.equal(f.match('Linux服务器日常运维与部署', cfg, { experience: '在校/应届', education: '本科' }).matched, false,
+    'an unrelated job that misses the explicit technical threshold still fails');
+
+  const linuxOnly = '嵌入式开发实习生，负责ARM平台的嵌入式Linux底层驱动与C/C++软件开发。';
+  const flexible = f.config({ mustHave: ['MCU|Linux', 'RTOS|Linux', 'ARM', 'C/C++'], mustHaveMin: 4 });
+  assert.equal(f.match(linuxOnly, flexible, { experience: '在校/应届' }).matched, true,
+    'the user can express acceptable alternative platforms through OR slots');
+});
+
 test('offline excludes real disallowed roles while accepting explicit negation and technical support', async (t) => {
   const f = await fixture(t);
   const cfg = f.config({ mustHave: ['MCU'], mustNot: ['外包|驻场', '销售', '培训'] });

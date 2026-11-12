@@ -11,6 +11,17 @@ const STATS = 'boss_helper_stats_v1';
 const OLD = { id: 'oldJobFixture', data: 'old01', title: '旧平台维护工程师', company: '旧测试公司' };
 const JOB = { id: 'currentJobFixture', data: 'job02', title: '嵌入式软件工程师', company: '测试研发公司' };
 const JD = '负责 STM32 产品软件研发、FreeRTOS 固件调试与产品功能维护，完成接口驱动及设备通信协议开发。';
+const MIXED_JOB = { ...JOB, title: '【27届校招】嵌入式软件工程师', company: '阿费卡科技', jd: `【岗位介绍】
+参与机器人及智能硬件产品研发，负责 Linux/RTOS 系统软件、设备驱动、传感器接入、软硬件联调及性能优化；
+入职后可重点向系统与驱动、MCU/RTOS、机器人传感器或 SoC 性能方向发展。
+【岗位职责】
+1.参与 BSP、设备驱动、通信协议和嵌入式应用的设计、开发与调试；
+2.参与 Linux/RTOS 系统移植、裁剪、模块开发及性能和稳定性优化；
+3.完成摄像头、3D-ToF、IMU、电机等设备接入和软硬件联调；
+4.配合硬件、算法和测试团队定位问题，完成必要的设计、测试和调试文档。
+【任职要求】
+1.本科及以上学历，计算机、电子信息、自动化、通信、软件工程等相关专业；
+2.具备扎实的 C/C++ 基础，理解指针、内存管理、数据结构和并发编程。` };
 function detail(job, text = JD) {
   return `<section class="job-detail" data-jobid="${job.data}"><header class="job-banner">
     <h1 class="job-name">${job.title}</h1><a class="company-name" href="/gongsi/fixture.html">${job.company}</a>
@@ -43,7 +54,8 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
   win.GM_addStyle = () => {};
   win.unsafeWindow = win;
   win.GM_xmlhttpRequest = (o) => {
-    requests.push({ url: o.url, model: JSON.parse(o.data).model });
+    const requestBody = JSON.parse(o.data);
+    requests.push({ url: o.url, model: requestBody.model, messages: requestBody.messages });
     if (onRequest && onRequest(win, o) === false) return { abort() {} };
     setTimeout(() => o.onload({ status: primaryFails && o.url.includes('primary.example') ? 503 : 200,
       responseText: JSON.stringify({ choices: [{ message: { content: '{"match":true,"score":95,"reason":"岗位方向匹配"}' } }] }) }), 0);
@@ -71,8 +83,8 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
   for (const card of win.document.querySelectorAll('.job-card-box')) card.addEventListener('click', (e) => {
     e.preventDefault(); expands++;
     const job = jobs.find((j) => j.id === card.dataset.fixtureId);
-    win.document.getElementById('detail-host').innerHTML = detail(job, job.id === JOB.id ? JD
-      : '负责下一型号 STM32 控制器固件设计，使用 FreeRTOS 开发驱动模块，并维护设备通信协议及量产测试软件。');
+    win.document.getElementById('detail-host').innerHTML = detail(job, job.jd || (job.id === JOB.id ? JD
+      : '负责下一型号 STM32 控制器固件设计，使用 FreeRTOS 开发驱动模块，并维护设备通信协议及量产测试软件。'));
     win.document.querySelector('.op-btn-chat').addEventListener('click', (event) => {
       event.preventDefault(); clicks++; countAtClick = win.BH.loadStats().sent;
       if (onContact) onContact(win, { clicks, countAtClick, job });
@@ -97,6 +109,38 @@ async function waitUntil(condition, timeout = 15000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (condition()) return; await delay(25); }
 }
+
+test('截图MCU与Linux混合校招先调用AI，通过后离线关键词不能再次拦截', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, jobs: [MIXED_JOB], settings: {
+    mustHave: ['AUTOSAR'], mustNot: ['Linux'], yearsMin: 5, eduMin: 4, salaryMin: 50,
+    aiUserPortrait: '寻找 MCU、RTOS、单片机嵌入式研发校招岗位，愿意学习同领域技术。',
+  } });
+  f.start();
+  await waitUntil(() => f.clickCount() > 0 || /主循环异常/.test(f.logs()), 12000);
+  assert.equal(f.requests.length, 1, f.logs());
+  assert.equal(f.clickCount(), 1, f.logs());
+  assert.equal(f.win.BH.loadStats().skipped, 0);
+  const prompt = f.requests[0].messages.map((message) => message.content).join('\n');
+  assert.match(prompt, /MCU\/RTOS/);
+  assert.match(prompt, /Linux\/RTOS/);
+  assert.match(prompt, /MCU.*不互斥|不互斥.*MCU/);
+  assert.match(f.logs(), /AI 通过/);
+});
+
+test('混合技术岗位仍使用AI实际结论，不能因命中MCU和Linux就强行投递', { timeout: 16000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, jobs: [MIXED_JOB], settings: { mustHave: ['MCU|Linux'], maxRounds: 1 },
+    onRequest(win, request) {
+      request.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: {
+        content: '{"match":false,"score":10,"reason":"画像明确排除该岗位业务"}',
+      } }] }) });
+      return false;
+    } });
+  f.start();
+  await waitUntil(() => f.stopped() || f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1', 12000);
+  assert.equal(f.requests.length, 1, f.logs());
+  assert.equal(f.clickCount(), 0);
+  assert.match(f.logs(), /AI 不匹配.*画像明确排除该岗位业务/);
+});
 
 for (const aiEnabled of [false, true]) {
   test(`离线完整投递：AI${aiEnabled ? '未配置' : '关闭'}，MCU别名命中STM32后只发起一次沟通`, { timeout: 20000 }, async (t) => {

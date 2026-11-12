@@ -1719,7 +1719,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v114（旧误拒结论不得沿用）', /^v114\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v115（旧混合方向误拒结论不得沿用）', /^v115\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2707,8 +2707,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v114（v21 及更早结论自动失效）',
-     /^v114\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v115（v114 及更早结论自动失效）',
+     /^v115\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 
@@ -2736,7 +2736,7 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
 }
 
 // ============================================================
-section('49. 岗位方向匹配以求职画像为核心依据：修大类岗位被误投（v1.0.21）');
+section('49. 岗位方向匹配以实际职责和明确可选子方向为依据');
 {
   // 复现用户截图（2026-10-13）：
   //   画像：嵌入式软件应届生…寻找 MCU 嵌入式/单片机开发工作
@@ -2760,13 +2760,13 @@ section('49. 岗位方向匹配以求职画像为核心依据：修大类岗位�
     ].join('\n'),
   };
 
-  // 49a. SYSTEM_PROMPT：维度 1 必须声明"以画像为核心依据 + 顺带提及不算匹配"
+  // 49a. 大类校招有明确可选子方向时不能因并列招聘自动拒绝。
   ok('SYSTEM_PROMPT 维度 1 写明以画像技术栈与求职意向为核心依据',
      /核心依据/.test(BH.SYSTEM_PROMPT));
-  ok('SYSTEM_PROMPT 写明并列/顺带提及画像关键词不构成方向匹配',
-     /并列列出或顺带提及画像中的关键词/.test(BH.SYSTEM_PROMPT));
-  ok('SYSTEM_PROMPT 维度 1 要求看标题与主要职责判断主体方向',
-     /主体方向（看标题与主要职责）/.test(BH.SYSTEM_PROMPT));
+  ok('SYSTEM_PROMPT 接受相关混合研发与明确可选校招子方向',
+     /MCU 与嵌入式 Linux\/RTOS 不互斥/.test(BH.SYSTEM_PROMPT) && /可选择匹配子方向的校招可以匹配/.test(BH.SYSTEM_PROMPT));
+  ok('SYSTEM_PROMPT 维度 1 以真实职责、任职要求和可选子方向判断',
+     /真实职责、任职要求及明确可选择的招聘子方向/.test(BH.SYSTEM_PROMPT));
 
   // 49b. 画像非空：prompt 画像段带方向匹配规则
   resetAll();
@@ -2778,15 +2778,15 @@ section('49. 岗位方向匹配以求职画像为核心依据：修大类岗位�
   const p = BH.buildAIPrompt(hwJob);
   ok('画像段写明方向匹配以画像技术栈与求职意向为核心依据',
      /判断岗位方向是否匹配，以上方画像的技术栈与求职意向为\*{0,2}核心依据/.test(p));
-  ok('画像段写明 JD 并列/顺带提及画像关键词不算匹配',
-     /并列列出、顺带提及画像中的关键词（如大类招聘把多个方向并列写在一条里）不构成方向匹配/.test(p));
-  ok('画像段要求主体方向与画像方向不同领域时判不匹配',
-     /主体方向（看标题与主要职责）与画像方向属于不同领域时，判不匹配/.test(p));
+  ok('画像段不再把混合技术或可选MCU校招方向一律排除',
+     /混合研发或可选择 MCU\/RTOS 子方向的校招可以匹配/.test(p) && !/并列列出、顺带提及.*不构成方向匹配/.test(p));
+  ok('画像段仍拒完全无关且没有匹配内容的职位，背景孤立关键词不算匹配',
+     /完全无关且没有匹配职责或可选方向/.test(p) && /公司介绍或福利中的孤立关键词不算匹配/.test(p));
   ok('画像原文完整送入 prompt', p.includes('寻找与 MCU 嵌入式软件开发岗位'));
 
-  // 49c. "只认事实"模式：方向匹配不适用"拿不准放行"
-  ok('只认事实模式为方向匹配开例外（不适用拿不准放行）',
-     /方向是否匹配不适用/.test(p) && /明确判 false/.test(p));
+  // 49c. 方向不符也须由当前岗位明确事实支撑，不能推测技术栈互斥。
+  ok('只认事实模式不允许推测MCU与Linux互斥后拒绝',
+     /方向不符也必须有当前职责的明确证据/.test(p) && /不能推测 MCU 与 Linux\/RTOS 互斥/.test(p));
 
   // 49d. 画像为空：不强加方向规则，保留原保守文案
   setCfg({ ...cfg, aiUserPortrait: '' });
@@ -2821,6 +2821,91 @@ section('49. 岗位方向匹配以求职画像为核心依据：修大类岗位�
      /岗位方向匹配以画像里的技术栈与求职意向为核心依据/.test(modalH.textContent));
   modalH.querySelector('[data-act="aiclose"]')?.click();
   docH.querySelectorAll('#bh-ai-modal, #bh-ai-confirm').forEach((el) => el.remove());
+  resetAll();
+}
+
+// ============================================================
+section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存回归');
+{
+  const portrait = '嵌入式软件应届生，熟悉 STM32、FreeRTOS，有 FOC 电机控制项目经验，寻找 MCU 嵌入式软件或单片机开发工作。';
+  // 用户截图原文。请求组装和结果处理用本地桩验证，不能代替真实模型准确率评估。
+  const mixedJob = {
+    title: '【27届校招】嵌入式软件工程师', company: '阿费卡科技', salary: '15-30K',
+    location: '深圳', experience: '在校/应届', education: '本科', activeText: '刚刚活跃', jobId: 'MIXED_MCU_LINUX_SCREENSHOT',
+    jd: [
+      '【岗位介绍】',
+      '参与机器人及智能硬件产品研发，负责Linux/RTOS系统软件、设备驱动、传感器接入、软硬件联调及性能优化；入职后可重点向系统与驱动、MCU/RTOS、机器人传感器或SoC性能方向发展。',
+      '【岗位职责】',
+      '1.参与BSP、设备驱动、通信协议和嵌入式应用的设计、开发与调试；',
+      '2.参与Linux/RTOS系统移植、裁剪、模块开发及性能和稳定性优化；',
+      '3.完成摄像头、3D-ToF、IMU、电机等设备接入和软硬件联调；',
+      '4.配合硬件、算法和测试团队定位问题，完成必要的设计、测试和调试文档。',
+      '【任职要求】',
+      '1.本科及以上学历，计算机、电子信息、自动化、通信、软件工程等相关专业；',
+      '2.具备扎实的C/C++基础，理解指针、内存管理、数据结构和并发编程。',
+    ].join('\n'),
+  };
+  const cfg = semanticCfg({ aiUserPortrait: portrait, aiCacheEnabled: false });
+  resetAll(); setCfg(cfg);
+  let sent = null;
+  netHandler = (o) => {
+    sent = JSON.parse(o.data).messages;
+    reply(o, { choices: [{ message: { content: '{"match":true,"score":90,"reason":"嵌入式研发且可选择MCU/RTOS方向"}' } }] });
+  };
+  const screened = await BH.aiScreen(mixedJob);
+  const system = sent.filter((message) => message.role === 'system').map((message) => message.content).join('\n');
+  const user = sent.find((message) => message.role === 'user').content;
+  ok('截图完整职责送入模型，Linux与可选MCU/RTOS均保留',
+     user.includes(mixedJob.jd) && user.includes('MCU/RTOS') && user.includes('BSP、设备驱动'));
+  ok('截图请求明确禁止主体偏Linux/系统驱动作为独立拒绝理由',
+     system.includes('不得仅因 Linux 描述更多、主体偏系统驱动或不是纯 MCU 而拒绝'));
+  ok('截图请求明确按入职可选MCU/RTOS方向评估',
+     system.includes('校招明确允许入职后重点向 MCU/RTOS 等匹配子方向发展时，应按该可选方向评估'));
+  ok('真实模型返回通过时保留该结论，不由提示层再拒绝',
+     screened.ok && screened.match && screened.reason === '嵌入式研发且可选择MCU/RTOS方向');
+
+  resetAll(); setCfg({ ...cfg, aiPromptTemplate: '自定义模板：根据岗位方向判断，输出JSON。' });
+  netHandler = (o) => {
+    sent = JSON.parse(o.data).messages;
+    reply(o, { choices: [{ message: { content: '{"match":true,"reason":"匹配"}' } }] });
+  };
+  await BH.aiScreen({ ...mixedJob, jobId: 'MIXED_CUSTOM_TEMPLATE' });
+  const customSystem = sent.find((message) => message.role === 'system').content;
+  ok('自定义模板仍收到混合方向判定规则',
+     customSystem.includes('自定义模板：') && customSystem.includes('MCU 与嵌入式 Linux/RTOS 不互斥'));
+
+  resetAll(); setCfg({ ...cfg, aiUserPortrait: portrait + '只做裸机/MCU，不投 Linux。' });
+  const excludedJob = { ...mixedJob, jobId: 'EXPLICIT_NO_LINUX', jd: '嵌入式Linux设备驱动工程师，必须负责Linux内核驱动、系统移植和BSP开发，不提供MCU岗位方向。' };
+  netHandler = (o) => {
+    sent = JSON.parse(o.data).messages;
+    reply(o, { choices: [{ message: { content: '{"match":false,"reason":"用户不投Linux，岗位必须承担Linux内核驱动"}' } }] });
+  };
+  const excluded = await BH.aiScreen(excludedJob);
+  ok('明确不投Linux画像完整送达，混合规则仍要求尊重用户限定',
+     sent[1].content.includes('只做裸机/MCU，不投 Linux。')
+     && sent[0].content.includes('当前岗位明确要求必须承担被排除方向的工作时按该条件拒绝'));
+  ok('明确排斥后的真实AI拒绝结论仍生效', excluded.ok && excluded.match === false);
+
+  resetAll(); setCfg(cfg);
+  netHandler = (o) => {
+    sent = JSON.parse(o.data).messages;
+    reply(o, { choices: [{ message: { content: '{"match":false,"reason":"当前职责为前端页面开发，与嵌入式无关"}' } }] });
+  };
+  const unrelated = await BH.aiScreen({ ...mixedJob, title: '前端开发工程师', jobId: 'UNRELATED_COMPANY_BACKGROUND',
+    jd: '公司业务包含MCU/RTOS智能硬件，福利有嵌入式技术培训。本岗位仅负责React网页开发、CSS页面和浏览器业务，不承担嵌入式开发，也无可选嵌入式方向。' });
+  ok('公司业务/福利孤立关键词不能替代当前职位职责，仍保留明确无关拒绝',
+     sent[0].content.includes('只在公司业务介绍、福利、其他岗位或无关背景中出现关键词') && unrelated.ok && unrelated.match === false);
+
+  resetAll(); setCfg({ ...cfg, aiCacheEnabled: true });
+  BH.setAICache(mixedJob.jobId, { match: false, reason: '旧版认为Linux主体不是MCU' }, mixedJob);
+  const old = structuredClone(store.get('boss_helper_ai_cache_v1'));
+  old[mixedJob.jobId].pf = old[mixedJob.jobId].pf.replace(/^v115\|/, 'v114|');
+  store.set('boss_helper_ai_cache_v1', old);
+  win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(old));
+  netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"reason":"可重点向MCU/RTOS发展"}' } }] });
+  const refreshed = await BH.aiScreen(mixedJob);
+  ok('v114旧混合方向拒绝缓存作废，重新请求并使用当前AI结论',
+     refreshed.ok && refreshed.match && !refreshed.cached && netCalls === 1);
   resetAll();
 }
 

@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="extension/manifest.json"><img src="https://img.shields.io/badge/version-1.1.4-168AAD?style=flat-square" alt="版本 1.1.4"></a>
+  <a href="extension/manifest.json"><img src="https://img.shields.io/badge/version-1.1.5-168AAD?style=flat-square" alt="版本 1.1.5"></a>
   <img src="https://img.shields.io/badge/Microsoft_Edge-Extension-0078D7?style=flat-square" alt="Microsoft Edge 独立扩展">
   <img src="https://img.shields.io/badge/Manifest-V3-2BAE83?style=flat-square" alt="Manifest V3">
   <a href="https://github.com/hxhxhxhy1226/BOSS-Haitou-Helper/stargazers"><img src="https://img.shields.io/github/stars/hxhxhxhy1226/BOSS-Haitou-Helper?style=flat-square&amp;color=E6A23C" alt="GitHub Stars"></a>
@@ -75,6 +75,8 @@ AI 为可选功能。关闭 AI 即可使用本地规则筛选，无需授权 AI 
 4. 回到 AI 设置测试连接，确认可用后开启 AI 筛选并保存，再开始处理岗位。
 
 可以添加多个备用接口，调整顺序或单独停用。每个岗位优先使用 AI，按设置顺序依次尝试；第一个不可用立即尝试第二个，直到取得有效判断。全部不可用时保留当前岗位，等待一分钟再从第一个开始重试全部接口，持续循环。面板显示重试倒计时，可随时暂停、停止或修改配置。AI 每日请求上限仍生效，额度不足时等待恢复，不将岗位计作跳过。
+
+AI 开启时，列表和详情投递流程直接交给 AI 判断，本地关键词硬过滤仅在离线模式执行。MCU/RTOS 与嵌入式 Linux 的混合研发、明确可选择 MCU/RTOS 子方向的校招可匹配，不因同时写出 Linux、BSP 或设备驱动而拒绝。画像中没有写“不投 Linux”时，不会从“熟悉 MCU”推定用户排斥 Linux；明确的方向限定仍遵守。旧版本的方向拒绝缓存会重新判断。
 
 关闭 AI 或没有配置完整且已启用的接口时，使用完整本地条件筛选。必含词支持技术词别名和单词边界：例如 MCU/单片机、C++/CPP、STM32 型号与 Cortex-M；不会把 C# 误当 C++，或把 alarm 误当 ARM。关键词可按换行、逗号或分号分槽，同一槽内用 `|`、`/` 或 `\\` 表示“或”。“非外包”“无需驻场”和明确的研发技术培训、配合销售提供技术支持，会按上下文识别；明确外包、驻场或销售岗位仍排除。学历、年限和薪资按主面板的本地条件检查，校招可将年限设为“不限”。
 
@@ -143,13 +145,13 @@ npm run build
 
 | 输出 | 用途 |
 | --- | --- |
-| `dist/boss-helper-edge-1.1.4/` | 可直接加载到 Edge 的扩展目录。 |
-| `dist/boss-helper-edge-1.1.4.zip` | 安装包，解压后加载。 |
-| `dist/boss-helper-edge-1.1.4-github.zip` | 源码、测试、依赖锁文件和 GitHub Actions。 |
+| `dist/boss-helper-edge-1.1.5/` | 可直接加载到 Edge 的扩展目录。 |
+| `dist/boss-helper-edge-1.1.5.zip` | 安装包，解压后加载。 |
+| `dist/boss-helper-edge-1.1.5-github.zip` | 源码、测试、依赖锁文件和 GitHub Actions。 |
 
 Windows 安装了 Edge 时，可运行 `npm run test:edge`。它在独立测试目录中加载真正的扩展，通过本地模拟页面检查注入、保存、额度、停止和工具栏功能；`EDGE_BINARY` 可指定 Edge 可执行文件路径。
 
-当前 **1.1.4** 修复职位身份误判、AI 故障后跳过和离线筛选误跳过，覆盖有序接口切换、一分钟循环重试、停止与暂停、技术关键词和校招字段。`check` 校验 Manifest V3、资源引用、JavaScript 语法与版本一致性；GitHub Actions 执行依赖安装、检查、测试与打包。具体结果与范围见 [验证报告](VALIDATION.md)，版本变化见 [更新记录](CHANGELOG.md)。
+当前 **1.1.5** 修复 MCU/RTOS 与嵌入式 Linux 混合岗位的 AI 方向误判，并将本地关键词硬过滤限定在离线投递流程。`check` 校验 Manifest V3、资源引用、JavaScript 语法与版本一致性；GitHub Actions 执行依赖安装、检查、测试与打包。具体结果与范围见 [验证报告](VALIDATION.md)，版本变化见 [更新记录](CHANGELOG.md)。
 
 正式图标位于 `extension/icons/`，公文包图标的可编辑源和 512px 原图位于 `design/briefcase/`。扩展运行只使用打包后的本地代码，开发依赖和图标生成工具不进入运行包。
 

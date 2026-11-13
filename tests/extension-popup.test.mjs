@@ -50,7 +50,8 @@ async function fixture(t, options = {}) {
       onChanged: { addListener: (listener) => listeners.storage.push(listener) },
     },
     permissions: {
-      contains: async ({ origins }) => origins.every((origin) => granted.has(origin)),
+      contains: async ({ origins }) => origins.every((origin) => granted.has(origin)
+        || granted.has(origin.startsWith('https://') ? 'https://*/*' : 'http://*/*')),
       request: (request) => {
         permissionRequests.push(clone(request));
         if (options.permissionThrows) throw new Error('Request not available');
@@ -219,4 +220,63 @@ test('未配置AI时不请求权限，权限接口异常时显示可操作提示
   await until(() => /权限操作未完成/.test(failure.id('message').textContent));
   await until(() => !failure.id('authorize-api').disabled);
   assert.deepEqual(failure.errors, []);
+});
+
+test('一次授权仅由明确点击触发，告知浏览器权限范围且无需先保存接口', async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.id('authorize-all-api').disabled, false);
+  assert.equal(f.permissionRequests.length, 0);
+  assert.match(f.id('api-all-scope').textContent, /所有 HTTP\/HTTPS 网站/);
+  assert.match(f.id('api-all-scope').textContent, /仅发送到你配置的接口/);
+  assert.equal(f.id('authorize-all-api').getAttribute('aria-describedby'), 'api-all-scope');
+  f.id('authorize-all-api').click();
+  assert.deepEqual(f.permissionRequests, [{ origins: ['https://*/*', 'http://*/*'] }],
+    'Permission request stays in the button gesture, before any asynchronous operation');
+  await until(() => /已开启/.test(f.id('authorize-all-api').textContent));
+  assert.equal(f.id('authorize-all-api').disabled, true);
+  assert.match(f.id('api-summary').textContent, /新增接口.*拉取模型无需再次授权/);
+  assert.match(f.id('message').textContent, /一次授权完成/);
+  f.id('authorize-all-api').click();
+  assert.equal(f.permissionRequests.length, 1);
+});
+
+test('浏览器已记住的一次授权在重新打开和新增不同域名或本地端口后均复用', async (t) => {
+  const f = await fixture(t, { granted: ['https://*/*', 'http://*/*'] });
+  for (const aiBaseUrl of ['https://new-unsaved.example/v1', 'http://localhost:34567/v1']) {
+    await f.config({ aiBaseUrl, aiApiKey: 'never-display-key' });
+    await until(() => f.id('api-origins').textContent.includes(new URL(aiBaseUrl).origin));
+    assert.equal(f.id('authorize-api').disabled, true);
+    assert.equal(f.id('authorize-all-api').disabled, true);
+    assert.match(f.id('api-origins').textContent, /已授权/);
+  }
+  assert.doesNotMatch(f.doc.body.textContent, /never-display-key/);
+  assert.equal(f.permissionRequests.length, 0);
+});
+
+test('撤回一个协议的全域权限会退出免重复授权，保留单独授权的域名', async (t) => {
+  const f = await fixture(t, { config: { aiBaseUrl: 'https://saved.example/v1' },
+    granted: ['https://*/*', 'http://*/*', 'https://saved.example/*'] });
+  await f.removePermission('https://*/*');
+  await until(() => !f.id('authorize-all-api').disabled);
+  assert.equal(f.id('authorize-api').disabled, true, 'An individually retained host remains granted');
+  assert.doesNotMatch(f.id('api-summary').textContent, /新增接口.*无需再次授权/);
+  await f.config({ aiBaseUrl: 'https://another.example/v1' });
+  await until(() => !f.id('authorize-api').disabled);
+  assert.equal(f.permissionRequests.length, 0, 'Permission removal never causes an automatic permission prompt');
+  f.id('authorize-api').click();
+  assert.deepEqual(f.permissionRequests, [{ origins: ['https://another.example/*'] }]);
+});
+
+test('拒绝一次授权不会清除已有域名权限，并允许继续按域名授权', async (t) => {
+  const f = await fixture(t, { permissionDenied: true, config: { aiBaseUrl: 'https://saved.example/v1' },
+    granted: ['https://saved.example/*'] });
+  f.id('authorize-all-api').click();
+  await until(() => /未授予/.test(f.id('message').textContent));
+  await until(() => !f.id('authorize-all-api').disabled);
+  assert.equal(f.id('authorize-api').disabled, true);
+  assert.match(f.id('api-origins').textContent, /已授权/);
+  assert.equal(f.granted.has('https://*/*'), false);
+  await f.config({ aiBaseUrl: 'https://new.example/v1' });
+  await until(() => !f.id('authorize-api').disabled);
+  assert.equal(f.permissionRequests.length, 1);
 });

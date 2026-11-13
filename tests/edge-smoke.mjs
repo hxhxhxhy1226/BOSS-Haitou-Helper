@@ -24,6 +24,8 @@ let browserLog = '';
 child.stderr.on('data', (chunk) => { browserLog += chunk; });
 let ws, sequence = 0;
 const pending = new Map(), handlers = new Set(), checks = [], pageErrors = [];
+const modelFixtureRequests = [], blockedWorkerRequests = [];
+const apiPermissionVerification = { oneTimeGrant: 'not_attempted', draftModels: 'not_run' };
 function check(condition, message) { assert.ok(condition, message); checks.push(message); console.log('PASS ' + message); }
 async function until(fn, timeout = 15000) {
   const end = Date.now() + timeout;
@@ -39,8 +41,8 @@ function send(method, params = {}, sessionId) {
     ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
 }
-async function evaluate(session, expression) {
-  const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, session);
+async function evaluate(session, expression, options = {}) {
+  const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, ...options }, session);
   if (result.exceptionDetails) throw Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
   return result.result.value;
 }
@@ -172,6 +174,20 @@ try {
   const workerUrl = new URL(worker.url);
   const extensionOrigin = workerUrl.protocol + '//' + workerUrl.host;
   const workerSession = workerSessions.get(worker.targetId);
+  // Keep the real worker and permission API, but never reach an external AI provider.
+  handlers.add((event) => {
+    if (event.sessionId !== workerSession || event.method !== 'Fetch.requestPaused') return;
+    const { requestId, request } = event.params;
+    const url = new URL(request.url);
+    const models = request.method === 'GET' && url.protocol === 'https:' && url.pathname === '/v1/models'
+      && ['draft-one.fixture.example', 'draft-two.fixture.example'].includes(url.hostname);
+    (models ? modelFixtureRequests : blockedWorkerRequests).push(request.url);
+    send(models ? 'Fetch.fulfillRequest' : 'Fetch.failRequest', models ? { requestId, responseCode: 200,
+      responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+      body: Buffer.from(JSON.stringify({ data: [{ id: 'fixture-model' }] })).toString('base64') }
+      : { requestId, errorReason: 'BlockedByClient' }, workerSession).catch((error) => pageErrors.push(error.message));
+  });
+  await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, workerSession);
   check((await evaluate(workerSession, 'chrome.runtime.getManifest().version')) === extensionVersion, 'Edge 实际加载 Manifest V3 扩展与后台');
   const target = await send('Target.createTarget', { url: 'about:blank' });
   const page = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
@@ -196,7 +212,9 @@ try {
   await evaluate(page, `(()=>{const field=k=>document.querySelector('[data-cfg="'+k+'"]'); for(const [k,v] of Object.entries({mustHave:'MCU',mustNot:'',yearsMin:0,eduMin:0,salaryMin:0,activeDays:0,minDelay:0.5,maxDelay:0.5,dailyLimit:1,maxRounds:1,batchPauseSec:0})){field(k).value=v;} field('autoScroll').checked=false;field('autoSend').checked=true;document.querySelector('[data-act="save"]').click();})()`);
   await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.dailyLimit===1)"));
   check(await evaluate(page, "localStorage.getItem('boss_helper_config_v1')===null"), '配置保存在扩展存储，网站 localStorage 不含配置');
-  await evaluate(page, "document.querySelector('[data-act=toggle]').click()");
+  // The initial detail is already current, so selection need not click the card.
+  // Start this site's button rebuild independently to exercise re-location either way.
+  await evaluate(page, "startRebuilding(); document.querySelector('[data-act=toggle]').click()");
   await until(() => evaluate(page, 'fixtureClicks===1'), 20000);
   await until(() => evaluate(page, "document.querySelector('.bh-log').textContent.includes('官方已确认')"));
   check(await evaluate(page, 'fixtureClicks===1 && fixtureReplacements>1 && fixtureClickedGeneration===fixtureReplacements && fixtureReplaceTimer===null'), '同岗位按钮持续重建后只激活最新按钮一次，并获得官方确认');
@@ -242,8 +260,46 @@ try {
   await send('Emulation.setDeviceMetricsOverride', { width: 380, height: 650, deviceScaleFactor: 1, mobile: false }, popup);
   await until(() => evaluate(popup, "document.body?.textContent.includes('BOSS')"));
   check(await evaluate(popup, "!document.querySelector('script:not([src])')"), '工具栏页面在扩展 CSP 下加载');
+  await until(() => evaluate(popup, "!document.querySelector('#authorize-all-api').disabled"));
+  check(await evaluate(popup, "document.querySelector('#authorize-all-api').textContent.includes('一次授权') && document.querySelector('#api-all-scope').textContent.includes('所有 HTTP/HTTPS 网站') && !document.querySelector('#authorize-api').disabled"), '真实工具栏展示一次授权的完整访问范围，并保留逐域名选项');
+  const allOrigins = JSON.stringify({ origins: ['https://*/*', 'http://*/*'] });
+  check(!await evaluate(workerSession, `chrome.permissions.contains(${allOrigins})`) && modelFixtureRequests.length === 0
+    && blockedWorkerRequests.length === 0, '打开工具栏和未授权拉取不会自动扩大权限或产生外部 AI 请求');
   const popupShot = await send('Page.captureScreenshot', { format: 'png' }, popup);
   await fs.writeFile(path.join(output, 'edge-extension-popup.png'), Buffer.from(popupShot.data, 'base64'));
+  await evaluate(popup, "document.querySelector('#authorize-all-api').click()", { userGesture: true });
+  // Headless Edge may have no surface for confirming its native permission prompt.
+  // Record that limitation; never fake a grant or alter the production manifest.
+  let grantedAll = false;
+  const grantDeadline = Date.now() + 3000;
+  while (Date.now() < grantDeadline) {
+    grantedAll = await evaluate(workerSession, `chrome.permissions.contains(${allOrigins})`);
+    if (grantedAll || await evaluate(popup, "!!document.querySelector('#message.error')?.textContent")) break;
+    await delay(100);
+  }
+  apiPermissionVerification.oneTimeGrant = grantedAll ? 'granted_by_browser' : 'unconfirmed_in_headless';
+  if (grantedAll) {
+    check(await evaluate(workerSession, "chrome.permissions.contains({origins:['https://draft-one.fixture.example/*','https://draft-two.fixture.example/*']})"), '浏览器真实记住一次授权，并覆盖尚未保存的两个新服务域名');
+    const savedBase = await evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1.aiBaseUrl)");
+    await evaluate(page, "document.querySelector('[data-act=aiopen]').click()");
+    for (const hostname of ['draft-one.fixture.example', 'draft-two.fixture.example']) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await evaluate(page, `document.querySelector('#bh-ai-modal [data-cfg=aiBaseUrl]').value=${JSON.stringify('https://' + hostname + '/v1')};document.querySelector('#bh-ai-modal [data-act=aimodels]').click()`);
+        await until(() => evaluate(page, "!!document.querySelector('#bh-model-picker [data-model=fixture-model]')"));
+        check(await evaluate(page, "!document.querySelector('#bh-ai-confirm') && !document.querySelector('#bh-ai-modal [data-act=aimodels]').disabled"), `真实后台对未保存域名 ${hostname} 第 ${attempt + 1} 次拉取模型成功，无额外授权步骤`);
+        await evaluate(page, "document.querySelector('#bh-model-picker [data-act=close]').click()");
+      }
+    }
+    check(modelFixtureRequests.length === 4 && blockedWorkerRequests.length === 0
+      && await evaluate(workerSession, `chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1.aiBaseUrl===${JSON.stringify(savedBase)})`), '四次模型请求全部由本地拦截返回，草稿拉取不覆盖已保存接口');
+    await evaluate(page, `document.querySelector('#bh-ai-modal [data-cfg=aiBaseUrl]').value=${JSON.stringify(savedBase)};document.querySelector('#bh-ai-modal [data-act=aiclose]').click()`);
+    apiPermissionVerification.draftModels = 'passed_four_intercepted_requests';
+  } else {
+    apiPermissionVerification.reason = await evaluate(popup, "document.querySelector('#message').textContent") || 'Headless Edge did not confirm the native optional-host permission prompt.';
+    apiPermissionVerification.draftModels = 'not_run_without_real_browser_grant';
+    console.log('LIMITATION 一次授权后的新域名实测未运行：' + apiPermissionVerification.reason);
+  }
+  await send('Target.closeTarget', { targetId: popupTarget.targetId });
   const contactsBeforeLoading = await evaluate(page, 'fixtureClicks');
   await evaluate(page, '(' + installLazyListFixture.toString() + ')()');
   await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.dailyLimit===50 && v.boss_helper_config_v1.autoSend===false && v.boss_helper_config_v1.aiEnabled===false && v.boss_helper_config_v1.maxRounds===0)"));
@@ -258,7 +314,8 @@ try {
   await fs.writeFile(path.join(output, 'edge-extension-list-loading.png'), Buffer.from(listShot.data, 'base64'));
   check(pageErrors.length === 0, '真实内容脚本无未捕获页面异常');
   await fs.writeFile(path.join(output, 'edge-extension-report.json'), JSON.stringify({ status: 'passed', checks, pageErrors,
-    extensionVersion, browser: await send('Browser.getVersion') }, null, 2));
+    extensionVersion, apiPermissionVerification, modelFixtureRequests, blockedWorkerRequests,
+    browser: await send('Browser.getVersion') }, null, 2));
 } catch (error) {
   await fs.writeFile(path.join(output, 'edge-extension-failure.log'), String(error.stack) + '\n' + browserLog);
   throw error;

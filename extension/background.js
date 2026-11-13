@@ -169,7 +169,7 @@ function createBossNativeBackground(api, dependencies = {}) {
       throw error('请求地址与指定的 AI 接口不一致', 'INVALID_REQUEST');
     }
     if (!await api.permissions.contains({ origins: [permissionPattern(url)] })) {
-      throw error('尚未授权此 AI 服务。请点击浏览器工具栏中的助手图标，再点击「授权 AI 服务」；未保存的接口请先保存。', 'HOST_PERMISSION_REQUIRED');
+      throw error('尚未授权此 AI 服务的浏览器访问权限（不是 API 密钥验证失败）。请点击工具栏中的助手图标，选择「一次授权，新增 API 免重复授权」；或先保存接口，再选择「仅授权已保存域名」。授权后重新拉取模型或测试连接，同一域名无需重复授权。', 'HOST_PERMISSION_REQUIRED');
     }
     const headers = {};
     for (const [name, value] of Object.entries(message.headers || {})) {

@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.9 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.10 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -1016,7 +1016,19 @@
       const refreshedBody = last.bodyRevision > (selection?.bodyRevision ?? previous?.bodyRevision ?? 0);
       const confirmedSameBody = last.bodyConfirmed && !capturedPrevious?.bodyPending && previousIdentity.ok
         && (previousIdentity.strength >= 2 || previouslySelected);
-      if (!last.ok || last.bodyPending || needsNewBody && last.description === previous.description && !refreshedBody && !confirmedSameBody) {
+      const awaitingPreviousBody = needsNewBody && last.description === previous.description && !refreshedBody && !confirmedSameBody;
+      if (last.ok && awaitingPreviousBody && previousIdentity.conflict
+          && observedJobBody?.snapshot.fingerprint === last.fingerprint) {
+        // The first observation can be A's detail while B is already selected,
+        // so A has no previously confirmed owner. Preserve that explicit mismatch
+        // across waits/re-clicks instead of letting stable B metadata rename A's body.
+        last.bodyPending = true;
+        last.bodyConfirmed = false;
+        last.previousBodySnapshot = previous;
+        observedJobBody = { ...observedJobBody, snapshot: { ...last }, pending: true,
+          owner: previous, ownerRevision: previous.bodyRevision ?? 0 };
+      }
+      if (!last.ok || last.bodyPending || awaitingPreviousBody) {
         if (last.ok) last = { ...last, ok: false, reason: '标题已切换，职位正文尚未更新' };
         fingerprint = '';
       } else {
@@ -2381,6 +2393,7 @@
     const key = jobCardKey(card);
     const valid = () => !state.stopFlag && !!card?.isConnected && cardStillMatches(card, expected)
       && (!options.stillAllowed || options.stillAllowed());
+    const waitOptions = { timeoutMs: options.timeoutMs ?? 8000, stillAllowed: valid };
     const prepared = state._preparedJobSelection;
     state._preparedJobSelection = null;
     if (!valid()) return { ok: false, stopped: state.stopFlag, reason: '卡片已变化或已停止' };
@@ -2389,7 +2402,21 @@
     if (prepared?.cardKey === key && snapshotStillCurrent(prepared, expected, null, card)
         && jobSelectionAcknowledged(expected)) return prepared;
     const current = extractJobSnapshot(expected);
-    if (current.ok && current.bodyConfirmed && !current.bodyPending && jobSelectionAcknowledged(expected)) return current;
+    const acknowledged = jobSelectionAcknowledged(expected);
+    if (current.ok && current.bodyConfirmed && !current.bodyPending && acknowledged) return current;
+    let lastSnapshot = current;
+    if (acknowledged) {
+      // A selected card may still be receiving its body, or may only need the
+      // first stable confirmation. Re-clicking can cancel the site's request.
+      // Give that existing transition one bounded wait before attempting a reload.
+      lastSnapshot = await waitForJobSnapshot(expected, { ...waitOptions, previous: current, requireChange: !current.ok,
+        stillAllowed: () => {
+          const selected = selectedCardIdentity(true);
+          return valid() && !(selected && matchSnapshotIdentity(selected, expected).conflict);
+        } });
+      if (lastSnapshot.ok || lastSnapshot.stopped || lastSnapshot.cancelled || !valid()) return lastSnapshot;
+      addLog('当前岗位详情仍未完成，重新选择后再确认：' + lastSnapshot.reason, 'info');
+    }
 
     const allTargets = getJobCardClickTargets(card);
     // Keep fallbacks from distinct regions even if a highlighted title has many
@@ -2419,12 +2446,13 @@
         if ((clicked || selection) && await waitForJobSelection(expected, options.ackTimeoutMs ?? 450, valid)) {
           // Once selection is acknowledged, wait for its body without repeatedly
           // clicking and restarting the same page transition.
-          return await waitForJobSnapshot(expected, { previous, selection, timeoutMs: options.timeoutMs ?? 8000, stillAllowed: valid });
+          return await waitForJobSnapshot(expected, { ...waitOptions, previous, selection });
         }
       } finally { selection?.cleanup(); }
     }
-    return { ok: false, stopped: state.stopFlag, retryable: !state.stopFlag,
-      reason: candidates.length ? '卡片未实际切换到目标岗位，请稍后重试' : '未找到当前卡片的可点击区域' };
+    return { ...lastSnapshot, ok: false, stopped: state.stopFlag, retryable: !state.stopFlag,
+      reason: (candidates.length ? '卡片未实际切换到目标岗位' : '未找到当前卡片的可点击区域')
+        + (lastSnapshot.reason ? '；' + lastSnapshot.reason : '') };
   }
 
   async function advanceToNextJobCard(completedKey) {
@@ -6012,7 +6040,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
           (/404/.test(best?.err || '') ? '👉 404：接口路径不对，请确认是否 .../v1/chat/completions。\n' : '') +
           (/超时|timeout/i.test(best?.err || '')
             ? '👉 超时：接口未及时响应，请检查网络和接口授权。\n' +
-              '   请点击浏览器工具栏中的助手图标，授权已保存的 AI 接口域名。\n' +
+              '   点击工具栏助手图标可选择一次授权，后续新增 API 无需重复；也可仅授权已保存域名。\n' +
               `   当前超时设置 ${cfg.aiTimeoutMs || 20000}ms，若网关确实慢可在面板调大。\n`
             : '') +
           '\n其他排查：\n' +
@@ -6053,6 +6081,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     state._preparedJobSelection = null;
     state._jobOutcomes = new Map();
     state._jobReadRetries = new Map();
+    state._jobReadFailures = new Map();
     state._aiFailStreak = 0;
     state._aiHits = 0;
     state._aiWarned = false;
@@ -6164,6 +6193,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
   async function loop() {
     if (!state._processedJobs) state._processedJobs = new Set();
     if (!state._jobReadRetries) state._jobReadRetries = new Map();
+    if (!state._jobReadFailures) state._jobReadFailures = new Map();
     let cfg = state.config;
     let stats = loadStats();
     let stopReason = '';
@@ -6238,6 +6268,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         if (jobCardKey(card) !== key) { clearJobCardMarker(card); continue; }
         if (processed) {
           state._jobReadRetries.delete(key);
+          state._jobReadFailures.delete(key);
           markJobCardProcessed(card, key);
           await advanceToNextJobCard(key);
         }
@@ -6245,10 +6276,19 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
           const retries = (state._jobReadRetries.get(key) || 0) + 1;
           state._jobReadRetries.set(key, retries);
           if (retries >= 3) {
-            tagCard(card, 'not-sent', '岗位连续未就绪，可重新开始后重试');
+            const failure = state._jobReadFailures.get(key);
+            const reason = failure?.reason || card.querySelector('.bh-tag-reason')?.textContent || '卡片处理暂时不可用';
+            const readingOnly = failure && !failure.aiStarted;
+            const stage = readingOnly ? '详情读取失败' : '岗位处理未完成';
+            const status = readingOnly ? '未调用 AI，未投递' : '未执行沟通';
+            const finalReason = `${stage}（已重试 3 次）：${reason}；${status}，可重新开始后重试`;
+            tagCard(card, 'not-sent', finalReason);
+            addLog(`✗ ${readJobCard(card).title || '(无标题)'} | ${finalReason}`, 'err', failure?.diagnostic
+              || snapshotDiagnostic(extractJobSnapshot(readJobCard(card)), readJobCard(card)));
             markJobCardProcessed(card, key);
+            state._jobReadFailures.delete(key);
             await advanceToNextJobCard(key);
-          } else addLog(`岗位尚未就绪，将重试（${retries}/3）`, 'info');
+          } else addLog(`岗位尚未就绪，将重试（${retries}/3）：${state._jobReadFailures.get(key)?.reason || '等待当前卡片完成处理'}`, 'info');
         }
         // 每处理 batchSize 张就停一会（防风控）
         state._inBatch = (state._inBatch || 0) + 1;
@@ -6427,10 +6467,15 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     return [job.title, job.company, job.salary, job.experience, job.education, job.location, job.jd].filter(Boolean).join('\n');
   }
 
-  function snapshotDiagnostic(snapshot) {
+  function snapshotDiagnostic(snapshot, expected) {
+    const identity = (item) => `职位：${item?.title || '(未读取)'} | 公司：${item?.company || '(未读取)'} | 公开 ID：${item?.jobId || '(未提供)'} | 内部 ID：${item?.dataJobId || '(未提供)'}`;
     return [
-      '=== 岗位读取快照（v1.0.19）===',
+      '=== 岗位读取快照 ===',
       `状态：${snapshot.ok ? '已读取' : snapshot.reason || '未确认'}`,
+      ...(expected ? ['目标卡片：' + identity(expected)] : []),
+      '实际详情：' + identity(snapshot),
+      '当前选中卡片：' + identity(snapshot.selectedIdentity),
+      `正文确认：${snapshot.bodyConfirmed ? '已确认' : '未确认'} | 等待正文更新：${snapshot.bodyPending ? '是' : '否'}`,
       `职位：${snapshot.title || '(未读取)'} | 公司：${snapshot.company || '(未读取)'}`,
       `公开职位 ID：${snapshot.jobId || '(未提供)'} | 内部 ID：${snapshot.dataJobId || '(未提供)'}`,
       `薪资：${snapshot.salary || '(未识别)'} | 原文：${snapshot.salaryRaw || '(空)'}`,
@@ -6860,6 +6905,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     card.dataset.bhProcessing = '1';
 
     const expected = readJobCard(card);
+    const processingKey = jobCardKey(card);
     let { title, company } = expected;
     const tagCurrentCard = (kind, reason) => {
       if (!card?.isConnected || !cardStillMatches(card, expected)) return null;
@@ -6870,11 +6916,21 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       tagCurrentCard('not-sent', reason);
       addLog(`✗ ${title || '(无标题)'} | 未投递：${reason}`, 'skip');
     };
+    const rememberReadFailure = (reason, snapshot = extractJobSnapshot(expected)) => {
+      if (!card.isConnected || jobCardKey(card) !== processingKey) return;
+      if (!state._jobReadFailures) state._jobReadFailures = new Map();
+      const previous = state._jobReadFailures.get(processingKey);
+      const diagnostic = snapshotDiagnostic({ ...snapshot, ok: false, reason }, expected);
+      state._jobReadFailures.set(processingKey, { aiStarted: !!previous?.aiStarted, reason, diagnostic });
+      const stage = previous?.aiStarted ? '未执行沟通' : '未调用 AI，未投递';
+      const tag = tagCurrentCard('reading', '将重试：' + reason + '；' + stage);
+      if (tag) tag.dataset.bhRetryable = '1';
+      addLog(`✗ ${title || '(无标题)'} | 详情读取未确认：${reason}；${stage}`, 'skip', diagnostic);
+    };
     const jdCard = expected.jdCard;
     const hr = expected.hrText;
     if (!title) {
-      addLog('卡片标题未读取，跳过', 'err');
-      const stats = loadStats(); stats.skipped++; saveStats(stats); refreshStats();
+      rememberReadFailure('卡片标题尚未加载');
       return;
     }
 
@@ -6884,7 +6940,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       await sleep(humanDelay(400, 800));
     }
     if (!isInViewport(card) || !cardStillMatches(card, expected) || state.stopFlag) {
-      addLog('卡片不可见或已被列表复用，未处理：' + title, 'skip');
+      if (!state.stopFlag) rememberReadFailure(!isInViewport(card) ? '卡片尚未滚动到可见区域' : '卡片已被列表复用或身份已变化');
       return;
     }
     tagCurrentCard('reading', '正在确认当前卡片和职位正文');
@@ -6892,11 +6948,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     const snapshot = await selectJobCard(card, { expected });
     if (!snapshot.ok) {
       if (!snapshot.stopped) {
-        if (card.isConnected && cardStillMatches(card, expected)) {
-          const tag = tagCurrentCard('reading', '详情读取尚未完成，将重试；尚未调用 AI：' + snapshot.reason);
-          if (tag) tag.dataset.bhRetryable = '1';
-        }
-        addLog(`✗ ${title} | 详情读取未确认：${snapshot.reason}`, 'skip', snapshotDiagnostic(snapshot));
+        rememberReadFailure(snapshot.reason, snapshot);
       }
       return;
     }
@@ -6919,7 +6971,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       { name: '岗位标签', text: jdPanel },
       { name: '详情正文', text: jdDesc },
     ];
-    addLog(`已确认详情：${title} | 来源 ${snapshot.source} | 正文 ${jdDesc.length} 字 | 活跃[实时]="${collectLiveBadges(snapshot.hrRoot || snapshot.root).join(' ')}" | 经验="${job.experience}" 学历="${job.education}"`, 'info', snapshotDiagnostic(snapshot));
+    addLog(`已确认详情：${title} | 来源 ${snapshot.source} | 正文 ${jdDesc.length} 字 | 活跃[实时]="${collectLiveBadges(snapshot.hrRoot || snapshot.root).join(' ')}" | 经验="${job.experience}" 学历="${job.education}"`, 'info', snapshotDiagnostic(snapshot, expected));
     if (!sal && (snapshot.salaryRaw || expected.salaryRaw)) {
       addLog('薪资未能识别，按未标注处理；原文保留在详情日志中', 'info');
     }
@@ -6957,15 +7009,15 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
 
     // ===== AI 语义判断：包括排除词；本地仅先检查活跃度 =====
     if (state.config.aiEnabled) {
+      if (!state._jobReadFailures) state._jobReadFailures = new Map();
+      state._jobReadFailures.set(processingKey, { ...state._jobReadFailures.get(processingKey), aiStarted: true });
       tagCurrentCard('judging', '正在依据个人画像和当前职位正文判断');
       const gate = await runAIGate(card, job, {
         isCurrentInput: () => cardStillMatches(card, expected) && snapshotStillCurrent(snapshot, expected, job, card),
       });
       if (gate.action === 'stop') { notSent('已停止，未执行沟通'); return; }
       if (gate.action === 'retry') {
-        const tag = tagCurrentCard('reading', gate.reason || '当前岗位输入已变化，将重新读取');
-        if (tag) tag.dataset.bhRetryable = '1';
-        addLog(`⏳ ${title} | 当前岗位输入已变化，将重新读取`, 'info');
+        rememberReadFailure(gate.reason || '当前岗位输入已变化，将重新读取');
         return;
       }
       if (!cardStillMatches(card, expected) || !snapshotStillCurrent(snapshot, expected, job, card)) {

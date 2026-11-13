@@ -26,6 +26,7 @@ button:disabled { opacity: .5; cursor: default; }
 .danger:hover:not(:disabled) { background: #fbe0e0; }
 .full { width: 100%; }
 .footnote { margin: 10px 0 0; color: #8290a3; font-size: 11px; }
+.permission-scope { margin: 8px 0 12px; color: #64748b; }
 #api-origins { list-style: none; margin: 0 0 10px; padding: 0; max-height: 108px; overflow: auto; }
 #api-origins:empty { display: none; }
 #api-origins li { display: flex; gap: 6px; justify-content: space-between; border-bottom: 1px solid #eef1f7; padding: 5px 0; font-size: 11px; }

@@ -5,11 +5,14 @@
   const toggleButton = byId('toggle-panel');
   const stopButton = byId('stop');
   const authorizeButton = byId('authorize-api');
+  const authorizeAllButton = byId('authorize-all-api');
+  const ALL_API_ORIGINS = ['https://*/*', 'http://*/*'];
   let activeTabId = null;
   let helperStatus = null;
   let permissionPatterns = [];
   let permissionBusy = false;
   let permissionRevision = 0;
+  let allApiGranted = false;
 
   byId('version').textContent = chrome.runtime.getManifest().version;
 
@@ -102,13 +105,18 @@
   async function refreshPermissions() {
     const revision = ++permissionRevision;
     authorizeButton.disabled = true;
+    authorizeAllButton.disabled = true;
     try {
-      const stored = await chrome.storage.local.get(CONFIG_KEY);
+      const [stored, allGranted] = await Promise.all([
+        chrome.storage.local.get(CONFIG_KEY),
+        chrome.permissions.contains({ origins: ALL_API_ORIGINS }),
+      ]);
       const origins = apiOrigins(stored[CONFIG_KEY]);
       const states = await Promise.all(origins.map(async (item) => ({
-        ...item, granted: await chrome.permissions.contains({ origins: [item.pattern] }),
+        ...item, granted: allGranted || await chrome.permissions.contains({ origins: [item.pattern] }),
       })));
       if (revision !== permissionRevision) return;
+      allApiGranted = allGranted;
       permissionPatterns = [...new Set(states.filter((item) => !item.granted).map((item) => item.pattern))];
       const list = byId('api-origins');
       list.replaceChildren();
@@ -123,16 +131,22 @@
         row.append(origin, permission);
         list.append(row);
       }
-      byId('api-summary').textContent = !states.length
-        ? '先在页面助手的 AI 设置中填写接口地址并保存。'
-        : permissionPatterns.length ? '以下服务需要你允许扩展访问。' : '已保存的 AI 服务域名均已授权。';
-      authorizeButton.textContent = states.length && !permissionPatterns.length ? 'AI 接口已授权' : '授权 AI 接口';
+      byId('api-summary').textContent = allGranted
+        ? '访问权限已记住：新增接口、测试连接和拉取模型无需再次授权。'
+        : !states.length ? '可先一次授权，或保存接口后仅授权对应域名。'
+          : permissionPatterns.length ? '以下服务尚未授权。可一次允许所有 API 域名，或仅允许已保存域名。'
+            : '已保存的域名均已授权；同域名下更换模型、密钥或地址路径无需再次授权。';
+      authorizeAllButton.textContent = allGranted ? '已开启：新增 API 免重复授权' : '一次授权，新增 API 免重复授权';
+      authorizeAllButton.disabled = permissionBusy || allGranted;
+      authorizeButton.textContent = states.length && !permissionPatterns.length ? 'AI 接口已授权' : '仅授权已保存域名';
       authorizeButton.disabled = permissionBusy || permissionPatterns.length === 0;
     } catch (_) {
       if (revision !== permissionRevision) return;
       permissionPatterns = [];
+      allApiGranted = false;
       byId('api-summary').textContent = '无法读取接口权限，请重新打开扩展后重试。';
       authorizeButton.disabled = true;
+      authorizeAllButton.disabled = true;
     }
   }
 
@@ -142,19 +156,29 @@
     try { await chrome.tabs.create({ url: 'https://www.zhipin.com/web/geek/job' }); }
     catch (_) { message('未能打开职位页，请手动打开 BOSS 网站。', true); }
   });
-  authorizeButton.addEventListener('click', () => {
-    if (permissionBusy || !permissionPatterns.length) return;
+  function requestPermissions(origins, all = false) {
+    if (permissionBusy || !origins.length) return;
     permissionBusy = true;
     authorizeButton.disabled = true;
+    authorizeAllButton.disabled = true;
     // Call directly in the user click handler, before any await, to preserve the browser gesture.
     let request;
-    try { request = chrome.permissions.request({ origins: [...permissionPatterns] }); }
+    try { request = chrome.permissions.request({ origins: [...origins] }); }
     catch (_) { request = Promise.reject(new Error('Permission request unavailable')); }
     Promise.resolve(request).then((granted) => {
-      message(granted ? 'AI 接口授权完成，可回到页面继续。' : '未授予接口权限，仍可使用本地筛选。', !granted);
+      message(granted ? all
+        ? '一次授权完成。后续新增接口和拉取模型无需再授权，可回到页面继续。'
+        : 'AI 接口授权完成。此域名的权限会保留，无需每次拉取模型时授权。'
+        : '未授予新的接口权限，已有授权和本地筛选仍可使用。', !granted);
     }, () => {
       message('权限操作未完成，请重新打开扩展后重试。', true);
     }).finally(() => { permissionBusy = false; refreshPermissions(); });
+  }
+  authorizeButton.addEventListener('click', () => {
+    if (!authorizeButton.disabled) requestPermissions(permissionPatterns);
+  });
+  authorizeAllButton.addEventListener('click', () => {
+    if (!authorizeAllButton.disabled && !allApiGranted) requestPermissions(ALL_API_ORIGINS, true);
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {

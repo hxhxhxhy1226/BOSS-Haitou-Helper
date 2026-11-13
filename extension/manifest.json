@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BOSS直聘海投助手",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "description": "在 BOSS 职位页按规则与 AI 筛选岗位，使用官方默认招呼，管理每日额度。独立扩展，无需油猴。",
   "minimum_chrome_version": "120",
   "permissions": ["storage"],

@@ -431,8 +431,35 @@ test('missing host permission gives an actionable response without making an ext
   const f = fixture({ permission: false }), native = f.platform(); await native.ready;
   const response = await native.fetch('https://api.example/v1/chat/completions', { method: 'POST', body: '{}', endpoint: { baseUrl: 'https://api.example/v1' } });
   assert.equal(response.status, 403);
-  assert.match(await response.text(), /授权 AI 服务/);
+  assert.match(await response.text(), /一次授权，新增 API 免重复授权/);
   assert.equal(f.requests.length, 0);
+});
+
+test('remembered host access allows repeated model pulls and new draft endpoints across worker restarts', async () => {
+  const f = fixture();
+  const granted = new Set(['https://*/*', 'http://*/*']);
+  f.api.permissions.contains = async ({ origins }) => origins.every((origin) => granted.has(origin)
+    || granted.has(origin.startsWith('https://') ? 'https://*/*' : 'http://*/*'));
+  let worker = f.worker;
+  for (const [index, baseUrl] of ['https://first.example/v1', 'https://first.example/v2',
+    'https://second-new.example/v1', 'http://localhost:32456/v1'].entries()) {
+    if (index === 2) worker = f.create();
+    const result = await worker.handle({ type: 'BH_NATIVE', action: 'network.fetch', requestId: `remembered-${index}`,
+      method: 'GET', url: helperUrls.deriveModelsUrl(baseUrl), endpoint: { baseUrl } }, sender());
+    assert.equal(result.value?.status, 200, JSON.stringify(result));
+  }
+  assert.equal(f.requests.length, 4);
+  assert.equal(f.data[CONFIG].aiBaseUrl, 'https://api.example/v1/chat/completions', 'Draft endpoints need not overwrite saved settings');
+  granted.delete('https://*/*');
+  const revoked = await worker.handle({ type: 'BH_NATIVE', action: 'network.fetch', requestId: 'revoked',
+    method: 'GET', url: 'https://second-new.example/v1/models', endpoint: { baseUrl: 'https://second-new.example/v1' } }, sender());
+  assert.equal(revoked.value.status, 403);
+  assert.match(revoked.value.responseText, /浏览器访问权限/);
+  assert.equal(f.requests.length, 4, 'Revoked browser permission is checked before every actual request');
+  const mismatch = await worker.handle({ type: 'BH_NATIVE', action: 'network.fetch', requestId: 'mismatch-broad',
+    method: 'GET', url: 'http://localhost:32456/arbitrary', endpoint: { baseUrl: 'http://localhost:32456/v1' } }, sender());
+  assert.equal(mismatch.ok, false, 'Broad browser access must not relax the endpoint URL restriction');
+  assert.equal(f.requests.length, 4);
 });
 
 test('native request cancellation reaches the worker, rejects fetch and never calls success', async () => {

@@ -156,30 +156,7 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
     ...settings,
   });
   let expands = 0, clicks = 0, countAtClick = 0;
-  for (const card of win.document.querySelectorAll('.job-card-box, li.job-card-wrap')) {
-    if (initialJob?.id === card.dataset.fixtureId) card.classList.add('active');
-    if (deepInnerSelection && deepTitleStopsSelection) card.querySelector('.job-title').addEventListener('click', (event) => {
-      blockedTitleClicks.push(card.dataset.fixtureId);
-      event.preventDefault(); event.stopPropagation();
-    });
-    const selectionTarget = selectionDelegated ? win.document.querySelector('.job-list-wrapper')
-      : deepInnerSelection ? card.querySelector(deepSelectionListener === 'body' ? '.job-card-body' : '.job-title')
-        : innerSelection ? card.querySelector('.card-area') : card;
-    selectionTarget.addEventListener('click', (e) => {
-    if (!card.contains(e.target)) return;
-    if (selectionDelegated) {
-      selectionDefaultStates.push(e.defaultPrevented);
-      if (e.defaultPrevented) return; // Mimic a site delegated handler's navigation guard.
-    }
-    if (selectionPreventDefault) e.preventDefault();
-    if (selectionStopPropagation) e.stopPropagation();
-    expands++;
-    const job = jobs.find((j) => j.id === card.dataset.fixtureId);
-    if (onExpand && onExpand(win, { job, expands, target: e.target }) === false) return;
-    win.document.querySelectorAll('.job-card-box.active, li.job-card-wrap.active').forEach((node) => node.classList.remove('active'));
-    card.classList.add('active');
-    win.document.getElementById('detail-host').innerHTML = detail(job, job.jd || (job.id === JOB.id ? JD
-      : '负责下一型号 STM32 控制器固件设计，使用 FreeRTOS 开发驱动模块，并维护设备通信协议及量产测试软件。'));
+  const bindContact = (job) => {
     win.document.querySelector('.op-btn-chat').addEventListener('click', (event) => {
       event.preventDefault(); clicks++; countAtClick = win.BH.loadStats().sent;
       if (onContact) onContact(win, { clicks, countAtClick, job });
@@ -199,18 +176,48 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
       stay.className = 'default-btn cancel-btn'; stay.textContent = '留在此页';
       stay.addEventListener('click', () => stay.remove()); win.document.body.append(stay);
     });
+  };
+  const renderJob = (job) => {
+    win.document.querySelectorAll('.job-card-box.active, li.job-card-wrap.active').forEach((node) => node.classList.remove('active'));
+    win.document.querySelector('[data-fixture-id="' + job.id + '"]').classList.add('active');
+    win.document.getElementById('detail-host').innerHTML = detail(job, job.jd || (job.id === JOB.id ? JD
+      : '负责下一型号 STM32 控制器固件设计，使用 FreeRTOS 开发驱动模块，并维护设备通信协议及量产测试软件。'));
+    bindContact(job);
+  };
+  if (initialJob) bindContact(initialJob);
+  for (const card of win.document.querySelectorAll('.job-card-box, li.job-card-wrap')) {
+    if (initialJob?.id === card.dataset.fixtureId) card.classList.add('active');
+    if (deepInnerSelection && deepTitleStopsSelection) card.querySelector('.job-title').addEventListener('click', (event) => {
+      blockedTitleClicks.push(card.dataset.fixtureId);
+      event.preventDefault(); event.stopPropagation();
+    });
+    const selectionTarget = selectionDelegated ? win.document.querySelector('.job-list-wrapper')
+      : deepInnerSelection ? card.querySelector(deepSelectionListener === 'body' ? '.job-card-body' : '.job-title')
+        : innerSelection ? card.querySelector('.card-area') : card;
+    selectionTarget.addEventListener('click', (e) => {
+    if (!card.contains(e.target)) return;
+    if (selectionDelegated) {
+      selectionDefaultStates.push(e.defaultPrevented);
+      if (e.defaultPrevented) return; // Mimic a site delegated handler's navigation guard.
+    }
+    if (selectionPreventDefault) e.preventDefault();
+    if (selectionStopPropagation) e.stopPropagation();
+    expands++;
+    const job = jobs.find((j) => j.id === card.dataset.fixtureId);
+    if (onExpand && onExpand(win, { job, expands, target: e.target, render: () => renderJob(job) }) === false) return;
+    renderJob(job);
     });
   }
   let runtime = code;
   if (snapshotWait != null) {
-    const call = 'waitForJobSnapshot(expected, { previous, selection, timeoutMs: options.timeoutMs ?? 8000, stillAllowed: valid })';
+    const call = 'const waitOptions = { timeoutMs: options.timeoutMs ?? 8000, stillAllowed: valid };';
     assert.ok(runtime.includes(call), 'The retry fixture must use the real snapshot wait call');
-    runtime = runtime.replace(call, 'waitForJobSnapshot(expected, { previous, selection, timeoutMs: '
-      + snapshotWait + ', stableMs: 50, pollMs: 10, stillAllowed: valid })');
+    runtime = runtime.replace(call, 'const waitOptions = { timeoutMs: options.timeoutMs ?? '
+      + snapshotWait + ', stableMs: 50, pollMs: 10, stillAllowed: valid };');
   }
   win.eval(runtime);
   await delay(0);
-  return { win, values, requests, errors, selectionDefaultStates, blockedTitleClicks, expandCount: () => expands, clickCount: () => clicks, countAtClick: () => countAtClick,
+  return { win, values, requests, errors, selectionDefaultStates, blockedTitleClicks, renderJob, expandCount: () => expands, clickCount: () => clicks, countAtClick: () => countAtClick,
     logs: () => win.document.querySelector('.bh-log')?.textContent || '',
     // Start persists settings before marking the loop running; that pending save is not a stopped task.
     stopped: () => !win.BH.state.running && !win.BH.state._starting && !win.BH.state._loopActive,
@@ -531,7 +538,7 @@ test('三岗位仅内层card-area监听：默认A详情，A/B/C分别调用AI并
   await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 40000);
   assert.ok(f.stopped(), '三张卡片须完成回执处理并结束循环：' + f.logs());
   assert.equal(f.clickCount(), 3, f.logs());
-  assert.equal(f.expandCount(), 3, f.logs());
+  assert.equal(f.expandCount(), 2, '默认已选中的首张只需确认稳定正文，不应重新点击：' + f.logs());
   assert.equal(f.requests.length, 3, '每个目标岗位均应执行一次AI');
   assert.equal(f.win.BH.state.config.aiEnabled, true, '推进卡片不能关闭AI');
   assert.deepEqual(observed.map((entry) => entry.selected), jobs.map((job) => job.id));
@@ -571,6 +578,70 @@ test('详情暂未就绪保持可重试，下一轮成功后才标记已处理',
   assert.equal(f.clickCount(), 1, f.logs());
   assert.equal(f.win.BH.loadStats().skipped, 0, '读取未就绪不是筛选拒绝');
   assert.ok(f.win.document.querySelector('.bh-tag-pass'));
+});
+
+test('慢正文跨越首次等待后继续等待同一请求，不重点击取消加载，AI只读取一次新正文', { timeout: 18000 }, async (t) => {
+  let responseTimer = null;
+  const f = await fixture(t, { aiEnabled: true, innerSelection: true, snapshotWait: 1400, officialSuccess: true,
+    onExpand(win, { job, render }) {
+      // The site's request is cancelled and restarted by every repeated click.
+      if (responseTimer != null) win.clearTimeout(responseTimer);
+      selectMetadataWithoutUpdatingBody(win, job);
+      responseTimer = win.setTimeout(render, 2500);
+      return false;
+    },
+    onRequest(win, request) {
+      assert.ok(JSON.parse(request.data).messages[1].content.includes(JD));
+      assert.doesNotMatch(JSON.parse(request.data).messages[1].content, /负责旧型号设备维护与旧通信平台升级/);
+    },
+  });
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 15000);
+  assert.ok(f.stopped(), f.logs());
+  assert.match(f.logs(), /岗位尚未就绪，将重试（1\/3）/, '必须跨越第一次等待，覆盖真正的下一轮重试');
+  assert.equal(f.expandCount(), 1, '已经选中目标时，应接着等服务器正文而非再次点击：' + f.logs());
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.clickCount(), 1);
+  assert.equal(f.win.BH.loadStats().sent, 31);
+  assert.ok(f.win.document.querySelector('.bh-tag-pass'));
+});
+
+test('已选中但尚未稳定的首张详情只确认正文，不重新点击', { timeout: 12000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, initialJob: JOB, officialSuccess: true });
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 10000);
+  assert.ok(f.stopped(), f.logs());
+  assert.equal(f.expandCount(), 0, f.logs());
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.clickCount(), 1);
+  assert.ok(f.win.document.querySelector('.bh-tag-pass'));
+});
+
+test('首次观察时已选中B但仍显示A，随后只换B页头不能确认A的旧正文，新正文到达可恢复', { timeout: 12000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, innerSelection: true,
+    onExpand(win, { job }) { selectMetadataWithoutUpdatingBody(win, job); return false; },
+  });
+  const card = f.win.document.querySelector('.job-card-box');
+  card.classList.add('active');
+  const expected = f.win.BH.readJobCard(card);
+  const previous = f.win.BH.extractJobSnapshot(expected);
+  assert.equal(previous.ok, false, '尚未观察或确认过A；目标B对应的详情仍是A');
+  assert.equal(previous.title, OLD.title);
+  const pending = f.win.BH.selectJobCard(card, { expected, timeoutMs: 1100 });
+  f.win.setTimeout(() => selectMetadataWithoutUpdatingBody(f.win, JOB), 40);
+  const result = await pending;
+  assert.equal(result.ok, false, '没有历史body owner时，不能把新页头配旧正文确认给B');
+  assert.match(result.reason, /职位正文尚未更新/);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.clickCount(), 0);
+  assert.equal(f.win.BH.extractJobSnapshot(expected).bodyPending, true, '待更新状态须跨等待与重点击保留');
+  const previousClicks = f.expandCount();
+  f.win.document.querySelector('.job-sec-text').textContent = JD;
+  const recovered = await f.win.BH.selectJobCard(card, { expected, timeoutMs: 1400 });
+  assert.equal(recovered.ok, true, recovered.reason);
+  assert.equal(recovered.bodyPending, false);
+  assert.equal(recovered.description, JD);
+  assert.equal(f.expandCount(), previousClicks, '真实正文到达后可直接确认，不得永久pending或再次重点击');
 });
 
 for (const innerSelection of [true, false]) {
@@ -619,11 +690,54 @@ test('详情连续未就绪只进行三次有界重试，不请求AI或占用投
   assert.equal(f.win.BH.loadStats().sent, 30);
   assert.equal(f.win.BH.loadStats().skipped, 0);
   const card = f.win.document.querySelector('.job-card-box');
-  assert.match(card.querySelector('.bh-tag-not-sent')?.textContent || '', /失败.*连续未就绪/);
+  assert.match(card.querySelector('.bh-tag-not-sent')?.textContent || '', /失败.*已重试 3 次.*标题已切换，职位正文尚未更新.*未调用 AI，未投递/);
+  assert.match(card.querySelector('.bh-tag-not-sent').title, /标题已切换，职位正文尚未更新/);
+  assert.match(f.logs(), /详情读取失败.*标题已切换，职位正文尚未更新/);
+  const finalLog = [...f.win.document.querySelectorAll('.bh-log-line')].find((line) => /详情读取失败（已重试 3 次）/.test(line.textContent));
+  finalLog.click();
+  const diagnostic = f.win.document.querySelector('#bh-detail-modal [data-role="body"]').value;
+  assert.ok(diagnostic.includes('目标卡片：职位：' + JOB.title));
+  assert.ok(diagnostic.includes('实际详情：职位：' + JOB.title));
+  assert.ok(diagnostic.includes('当前选中卡片：职位：' + JOB.title));
+  assert.match(diagnostic, /等待正文更新：是/);
   assert.equal(card.querySelector('.bh-tag-reading'), null, '三次读取耗尽后不能留下过程标签');
   assert.equal(card.querySelector('.bh-tag')?.dataset.bhReceiptMissing, undefined,
     '未点击的读取失败不能注册为等待迟到发送回执');
   assert.doesNotMatch(card.textContent, /待确认/);
+});
+
+test('卡片滚动后仍在视口外，保留具体读取原因且不计作筛选拒绝', { timeout: 15000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true });
+  const card = f.win.document.querySelector('.job-card-box');
+  card.getBoundingClientRect = () => ({ left: 60, top: 900, right: 660, bottom: 1200, width: 600, height: 300 });
+  f.start();
+  await waitUntil(() => card.dataset.bhProcessed === '1' || /主循环异常/.test(f.logs()), 12000);
+  f.win.BH.stop('fixture completed');
+  assert.match(card.querySelector('.bh-tag-not-sent')?.textContent || '', /已重试 3 次.*卡片尚未滚动到可见区域.*未调用 AI，未投递/);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.clickCount(), 0);
+  assert.equal(f.win.BH.loadStats().skipped, 0);
+});
+
+test('AI已调用后岗位输入变化，读取重试耗尽不能声称未调用AI', { timeout: 18000 }, async (t) => {
+  const f = await fixture(t, { aiEnabled: true, innerSelection: true, snapshotWait: 140,
+    onExpand(win, { expands, job }) {
+      if (expands === 1) return;
+      selectMetadataWithoutUpdatingBody(win, job);
+      win.document.querySelector('.job-banner .job-name').textContent = '另一岗位的新标题';
+      return false;
+    },
+    onRequest(win) { win.document.querySelector('.job-banner .job-name').textContent = '另一岗位的新标题'; },
+  });
+  const card = f.win.document.querySelector('.job-card-box');
+  f.start();
+  await waitUntil(() => card.dataset.bhProcessed === '1' || /主循环异常/.test(f.logs()), 15000);
+  f.win.BH.stop('fixture completed');
+  assert.equal(f.requests.length, 1, f.logs());
+  assert.equal(f.clickCount(), 0);
+  const reason = card.querySelector('.bh-tag-not-sent')?.textContent || '';
+  assert.match(reason, /岗位处理未完成.*已重试 3 次.*标题.*未执行沟通/);
+  assert.doesNotMatch(reason, /未调用\s*AI|尚未调用\s*AI/);
 });
 
 for (const phase of ['request', 'retry-wait']) {
@@ -633,11 +747,11 @@ for (const phase of ['request', 'retry-wait']) {
       { ...JOB, id: 'guardInputB', data: 'guard-b', title: '通信固件岗位B', jd: 'B独有职责：FreeRTOS通信协议与CAN控制模块开发。' },
     ];
     let changed = false;
-    const switchToB = (win) => {
+    const switchToB = () => {
       changed = true;
-      win.document.querySelectorAll('.job-card-box.active').forEach((node) => node.classList.remove('active'));
-      win.document.querySelector('[data-fixture-id="guardInputB"]').classList.add('active');
-      win.document.getElementById('detail-host').innerHTML = detail(jobs[1], jobs[1].jd);
+      // A real site transition renders a working official contact button. Do
+      // not rely on a redundant card click to install that button's listener.
+      f.renderJob(jobs[1]);
     };
     const f = await fixture(t, { aiEnabled: true, primaryFails: true, innerSelection: true, officialSuccess: true,
       jobs, settings: { maxRounds: 1, aiCacheEnabled: false },
@@ -645,7 +759,7 @@ for (const phase of ['request', 'retry-wait']) {
         const prompt = JSON.parse(request.data).messages[1].content;
         if (prompt.includes(jobs[0].jd)) {
           if (phase === 'request' && !changed) win.setTimeout(() => {
-            switchToB(win); request.onload({ status: 503, responseText: '{}' });
+            switchToB(); request.onload({ status: 503, responseText: '{}' });
           }, 0);
           else queueMicrotask(() => request.onload({ status: 503, responseText: '{}' }));
         } else queueMicrotask(() => request.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: {
@@ -658,12 +772,13 @@ for (const phase of ['request', 'retry-wait']) {
     if (phase === 'retry-wait') {
       await waitUntil(() => /一分钟后重试全部接口/.test(f.logs()), 10000);
       assert.equal(f.requests.length, 2, f.logs());
-      switchToB(f.win);
+      switchToB();
     }
     await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 25000);
     assert.ok(f.stopped(), '输入换岗后须完成当前岗位并结束循环：' + f.logs());
     assert.equal(changed, true);
     assert.equal(f.clickCount(), 1, f.logs());
+    assert.equal(f.expandCount(), 1, '换岗后已经选中B，只需确认新正文，不应再次点击B卡片');
     const prompts = f.requests.map((request) => request.messages[1].content);
     assert.equal(prompts.filter((prompt) => prompt.includes(jobs[0].jd)).length, phase === 'request' ? 1 : 2,
       '输入切换之后不能再发送旧岗位JD');
@@ -980,7 +1095,9 @@ for (const phase of ['stop', 'retry']) {
   test(`AI ${phase === 'stop' ? '停止' : '输入重读'}期间原卡DOM复用为B，不能回写A的过程或结果状态`, { timeout: 16000 }, async (t) => {
     let reused = false, observer;
     const incorrectTags = [];
-    const f = await fixture(t, { aiEnabled: true, jobs: [JOB, SECOND],
+    // This fixture deliberately never loads B's detail; shorten only its bounded
+    // read wait so the test reaches the stop-on-reselection hook promptly.
+    const f = await fixture(t, { aiEnabled: true, jobs: [JOB, SECOND], snapshotWait: 300,
       onExpand(win, { job }) {
         if (job.id === SECOND.id) {
           // The retry may select B next; finish before judging that separate job.

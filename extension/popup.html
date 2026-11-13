@@ -29,9 +29,11 @@
   <section class="card" aria-labelledby="api-heading">
     <h2 id="api-heading">AI 接口访问</h2>
     <p class="hint" id="api-summary">正在读取已保存的接口…</p>
+    <button id="authorize-all-api" class="primary full" aria-describedby="api-all-scope" disabled>一次授权，新增 API 免重复授权</button>
+    <p id="api-all-scope" class="footnote permission-scope">此选项允许扩展访问所有 HTTP/HTTPS 网站，AI 请求仍仅发送到你配置的接口。权限由浏览器记住，也可在扩展权限中撤回。</p>
     <ul id="api-origins" aria-label="已配置的 AI 服务域名"></ul>
-    <button id="authorize-api" class="secondary full" disabled>授权 AI 接口</button>
-    <p class="footnote">仅授权已保存接口所在的域名。使用本地筛选无需此授权。</p>
+    <button id="authorize-api" class="secondary full" disabled>仅授权已保存域名</button>
+    <p class="footnote">也可选择逐域名授权：同一域名只需一次。使用本地筛选无需授权。</p>
   </section>
 
   <p id="message" class="message" role="status" aria-live="polite"></p>

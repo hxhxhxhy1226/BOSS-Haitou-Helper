@@ -133,11 +133,12 @@ test('a delayed full snapshot cannot revert newer config, dispatched quota or a 
   await f.handle('storage.set', { values: { [CONFIG]: { ...f.data[CONFIG], dailyLimit: 150 } } }, sender(2));
   assert.equal((await f.handle('quota.commit', { reservation, limit: 150 }, sender(2))).value, true);
   assert.equal((await f.handle('quota.consumeAI', { limit: 2 }, sender(2))).value, true);
-  const newEvent = Object.keys(f.data).find((key) => key.startsWith(EVENT) && f.data[key].kind === 'ai');
+  const newEvent = (await f.handle('quota.reserve', { jobId: 'new-other-tab-job', limit: 150 }, sender(2))).value;
   release(); await native.flush();
   assert.equal(native.getValue(CONFIG).dailyLimit, 150);
   assert.equal(native.getValue(reservation.key).status, 'dispatched');
-  assert.equal(native.getValue(newEvent).status, 'dispatched');
+  assert.equal(native.getValue(newEvent.key).status, 'reserved');
+  assert.equal(native.getValue(STATS).aiCalls, 1);
 });
 
 test('a newer notification for a pending config key is applied when its older save reply finally arrives', async () => {
@@ -371,25 +372,64 @@ test('generic writes cannot overwrite quota journals or lower already consumed b
   assert.equal(f.worker.stats(f.data).processed, 0);
 });
 
-test('AI quota is atomic, follows the saved cap and resets only at the Beijing day boundary', async () => {
+test('AI attempt counts are atomic, ignore legacy caps and reset only at the Beijing day boundary', async () => {
   const f = fixture({ time: Date.parse('2026-11-10T15:59:59Z') });
   const results = await Promise.all(Array.from({ length: 7 }, (_, index) => f.handle('quota.consumeAI', { limit: 100 }, sender(index + 1))));
-  assert.equal(results.filter((result) => result.value).length, 2);
-  assert.equal(f.create().stats(f.data).aiCalls, 2);
+  assert.equal(results.filter((result) => result.value).length, 7);
+  assert.equal(f.create().stats(f.data).aiCalls, 7);
   f.time = Date.parse('2026-11-10T16:00:00Z');
   assert.equal((await f.handle('quota.consumeAI', { limit: 100 })).value, true);
   assert.equal(f.worker.stats(f.data).aiCalls, 1);
 });
 
-test('saved zero limits stay zero and a pending configuration save finishes before native quota is requested', async () => {
+test('legacy zero AI cap never blocks counting, while zero delivery cap and pending saves remain enforced', async () => {
   const f = fixture(), native = f.platform(); await native.ready;
   native.setValue(CONFIG, { ...native.getValue(CONFIG), aiDailyLimit: 0, dailyLimit: 0 });
-  assert.equal(await native.consumeAIDailyQuota(100), false);
+  assert.equal(await native.consumeAIDailyQuota(100), true);
   assert.equal(await native.reserveDelivery('zero-limit', 500), false);
   assert.equal(f.data[CONFIG].aiDailyLimit, 0);
-  assert.equal(f.worker.stats(f.data).aiCalls, 0);
+  assert.equal(f.worker.stats(f.data).aiCalls, 1);
   native.setValue(CONFIG, { ...native.getValue(CONFIG), dailyLimit: 2, autoSend: false });
   assert.equal(await native.reserveDelivery('auto-send-disabled', 500), false);
+});
+
+test('100 concurrent AI attempts preserve old journal counts across restart without growing storage keys or touching delivery quota', async () => {
+  const oldAIKey = EVENT + '2026-11-10_legacy-ai';
+  const sentKey = EVENT + '2026-11-10_legacy-sent';
+  const indexKey = 'boss_helper_daily_index_v22_2026-11-10';
+  const oldIndex = { keys: [oldAIKey, sentKey] };
+  const f = fixture({ values: {
+    [CONFIG]: { aiDailyLimit: 100, dailyLimit: 150, autoSend: true },
+    [STATS]: { schema: 22, date: '2026-11-10', aiCalls: 100, sent: 149, processed: 7, aiHits: 2 },
+    [oldAIKey]: { date: '2026-11-10', kind: 'ai', status: 'dispatched', ts: FIXED_TIME },
+    [sentKey]: { date: '2026-11-10', kind: 'sent', status: 'dispatched', ts: FIXED_TIME },
+    [indexKey]: oldIndex,
+  } });
+  const initialKeys = Object.keys(f.data).sort();
+  const results = await Promise.all(Array.from({ length: 100 }, (_, index) =>
+    f.handle('quota.consumeAI', { limit: index % 2 ? 0 : 100 }, sender(index % 3 + 1))));
+  assert.ok(results.every((result) => result.ok && result.value));
+  assert.equal(f.data[STATS].aiCalls, 200);
+  assert.equal(f.create().stats(f.data).aiCalls, 201, 'Old event is still counted once after a worker restart');
+  assert.deepEqual(Object.keys(f.data).sort(), initialKeys);
+  assert.deepEqual(f.data[indexKey], oldIndex);
+  assert.equal(f.worker.stats(f.data).sent, 150);
+  assert.equal((await f.handle('quota.reserve', { jobId: 'next-delivery', limit: 150 })).value, false);
+  await f.handle('storage.set', { values: { [STATS]: { aiCalls: 0, sent: 0, processed: 0 } } });
+  assert.equal(f.worker.stats(f.data).aiCalls, 201, 'Diagnostic reset cannot overwrite the new AI base counter');
+  assert.equal(f.worker.stats(f.data).sent, 150);
+});
+
+test('unlimited AI counting still reports failed or silently dropped persistence without advancing the count', async () => {
+  for (const failure of ['failSet', 'silentSet']) {
+    const f = fixture({ values: { [STATS]: { schema: 22, date: '2026-11-10', aiCalls: 120, sent: 149 } } });
+    f[failure] = true;
+    const result = await f.handle('quota.consumeAI', { limit: 0 });
+    assert.equal(result.ok, false);
+    assert.match(result.code, /STORAGE_FAILED|NATIVE_ERROR/);
+    assert.equal(f.worker.stats(f.data).aiCalls, 120);
+    assert.equal(f.worker.stats(f.data).sent, 149);
+  }
 });
 
 test('configured and explicit draft AI endpoints use authorized exact URLs with no page cookies or redirects', async () => {

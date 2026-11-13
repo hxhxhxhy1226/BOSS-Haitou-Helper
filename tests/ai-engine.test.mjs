@@ -278,15 +278,15 @@ section('6. 失败与重试（4.4）');
 }
 
 // ============================================================
-section('7. 每日上限与缓存维护（4.6、4.7）');
+section('7. AI 不限次数与缓存维护（4.6、4.7）');
 {
   resetAll(); setCfg(CFG({ aiDailyLimit: 2 }));
   netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":60,"reason":"ok"}' } }] });
   await BH.aiScreen({ title: 'a', jd: 'x', jobId: 'D1' });
   await BH.aiScreen({ title: 'b', jd: 'x', jobId: 'D2' });
   const r3 = await BH.aiScreen({ title: 'c', jd: 'x', jobId: 'D3' });
-  ok('超过 aiDailyLimit 后返回 AI次数超限', r3.ok === false && /AI次数超限/.test(r3.err), r3.err);
-  ok('超限后 AI 次数停在 2', BH.loadStats().aiCalls === 2);
+  ok('超过旧 aiDailyLimit 后继续使用真实 AI 结论', r3.ok === true, r3.err);
+  ok('超过旧上限后 AI 尝试次数继续累计', BH.loadStats().aiCalls === 3);
 
   // 过期缓存
   resetAll(); setCfg(CFG({ aiCacheDays: 7 }));
@@ -308,7 +308,7 @@ section('7. 每日上限与缓存维护（4.6、4.7）');
   BH.loadStats();
   store.set('boss_helper_stats_v1', { date: BH.todayKey(), sent: 5, processed: 5, skipped: 5, aiCalls: 7, aiHits: 2 });
   BH.resetStats();
-  ok('重置诊断后投递/AI 请求额度保留，不能绕过每日限额', BH.loadStats().aiCalls === 7 && BH.loadStats().sent === 5);
+  ok('重置诊断后投递额度与 AI 尝试计数保留', BH.loadStats().aiCalls === 7 && BH.loadStats().sent === 5);
   ok('重置计数后 AI 缓存保留', !!BH.getAICache('KEEP1'));
   BH.clearAICache();
   ok('清 AI 缓存按钮生效', BH.aiCacheSize() === 0);
@@ -344,11 +344,12 @@ section('9. 面板 UI 与配置读写（3.2）');
 
   // v1.0.1：AI 字段已不在主 panel，弹窗打开后用 document.querySelector 才能读到
   const q = (k) => doc.querySelector('[data-cfg="' + k + '"]');
-  for (const k of ['aiEnabled','aiBaseUrl','aiModel','aiApiKey','aiUserPortrait','aiDailyLimit',
+  for (const k of ['aiEnabled','aiBaseUrl','aiModel','aiApiKey','aiUserPortrait',
                    'aiFallback','aiTimeoutMs','aiMaxJDChars','aiCacheEnabled','aiPromptTemplate']) {
     ok(`AI 输入框存在：${k}`, !!q(k));
   }
   ok('API Key 输入框是 password 类型', q('aiApiKey') && q('aiApiKey').type === 'password');
+  ok('AI 次数固定显示不限，不保留误导的每日数值上限输入', !q('aiDailyLimit') && aiModal.querySelector('[data-role="ai-unlimited"]')?.textContent === '不限');
   ok('统计区存在「AI 已调用」数字位', !!panel.querySelector('[data-stat="aiCalls"]'));
   ok('弹窗内有「清 AI 缓存」按钮', !!aiModal.querySelector('[data-act="clearaicache"]'));
   ok('弹窗内有「测试 AI 连接」按钮', !!aiModal.querySelector('[data-act="aitest"]'));
@@ -360,7 +361,6 @@ section('9. 面板 UI 与配置读写（3.2）');
   q('aiModel').value = 'qwen-plus';
   q('aiApiKey').value = 'sk-mykey-abcdef123456';
   q('aiUserPortrait').value = '3年后端 Go，想找杭州 25K 以上';
-  q('aiDailyLimit').value = '42';
   q('aiFallback').value = 'skip';
   q('aiTimeoutMs').value = '15000';
   q('aiMaxJDChars').value = '1800';
@@ -373,7 +373,7 @@ section('9. 面板 UI 与配置读写（3.2）');
   ok('保存后模型正确', saved.aiModel === 'qwen-plus');
   ok('保存后 Key 正确', saved.aiApiKey === 'sk-mykey-abcdef123456');
   ok('保存后画像正确', saved.aiUserPortrait === '3年后端 Go，想找杭州 25K 以上');
-  ok('保存后每日上限=42', saved.aiDailyLimit === 42);
+  ok('保存后旧 AI 每日上限迁移为不限', saved.aiDailyLimit === null);
   ok('保存后降级策略=skip', saved.aiFallback === 'skip');
   ok('保存后超时=15000', saved.aiTimeoutMs === 15000);
   ok('保存后 JD 截断=1800', saved.aiMaxJDChars === 1800);
@@ -407,8 +407,9 @@ section('10. 降级策略 runAIGate 行为（第五节）');
   ok('skip 策略：aiScreen 返回 ok:false，交由上层标记跳过', r2.ok === false && /超时/.test(r2.err));
 
   resetAll(); setCfg(CFG({ aiDailyLimit: 0 }));
+  netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":50,"reason":"ok"}' } }] });
   const r3 = await BH.aiScreen({ title: 'x', jd: 'y', jobId: 'F3' });
-  ok('aiDailyLimit=0 时直接超限（不发起请求）', r3.ok === false && /AI次数超限/.test(r3.err));
+  ok('旧 aiDailyLimit=0 也能正常发起 AI 请求', r3.ok === true && netCalls === 1);
 
   resetAll(); setCfg(CFG({ aiCacheEnabled: false }));
   netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":50,"reason":"ok"}' } }] });
@@ -451,7 +452,7 @@ section('11. 配置持久化回归（AI 开关必须能留住）');
   });
   const oldCfg = BH.loadConfig();
   ok('0.9.2 老配置迁移后 aiEnabled=false（升级无感）', oldCfg.aiEnabled === false);
-  ok('0.9.2 老配置迁移后 AI 字段补齐', oldCfg.aiModel === 'gpt-4o-mini' && oldCfg.aiDailyLimit === 100);
+  ok('0.9.2 老配置迁移后 AI 字段补齐且次数不限', oldCfg.aiModel === 'gpt-4o-mini' && oldCfg.aiDailyLimit === null);
   ok('0.9.2 老配置的原有字段未被破坏', oldCfg.mustHave[0] === 'stm32' && oldCfg.yearsMin === 3 && oldCfg.dailyLimit === 50);
 
   // 11c. 老配置升级后，用户手动开启仍能留住
@@ -837,7 +838,7 @@ section('19. AI 弹窗开关组件结构（v1.0.4 防站点样式覆盖）');
   ok('aiCacheEnabled 开关结构完整', !!(cacheInput && cacheInput.parentElement.querySelector('.bh-ai-track')));
 
   // 紧凑输入框类名（旧类名 .compact / .compact-select 太通用且 CSS 定义曾遗漏）
-  ok('紧凑数字输入框用 bh-ai-num（3 处）', m6.querySelectorAll('.bh-ai-num').length === 3,
+  ok('超时和 JD 长度保留紧凑数字框（2 处），AI 次数不再输入上限', m6.querySelectorAll('.bh-ai-num').length === 2,
      '数量=' + m6.querySelectorAll('.bh-ai-num').length);
   ok('紧凑下拉用 bh-ai-select（1 处）', m6.querySelectorAll('.bh-ai-select').length === 1);
   ok('不再使用通用类名 .compact', m6.querySelectorAll('.compact, .compact-select').length === 0);
@@ -2144,7 +2145,6 @@ section('37. 临时故障保留岗位，无配置按全部本地条件复核');
     { name: 'HTTP 401', handler: (o) => reply(o, { error: { message: 'invalid test key' } }, 401) },
     { name: '非 JSON 输出', handler: (o) => reply(o, { choices: [{ message: { content: '无法输出结果' } }] }) },
     { name: '缺少 API Key', config: { aiApiKey: '' } },
-    { name: 'AI 次数已达上限', config: { aiDailyLimit: 0 } },
   ];
   for (const f of failures) {
     resetAll(); setCfg(semanticCfg({ mustNot: ['培训'], aiFallback: 'local', ...f.config }));
@@ -2180,16 +2180,9 @@ section('37. 临时故障保留岗位，无配置按全部本地条件复核');
   ok('缺 Key 时忽略旧 skip 策略，符合本地条件便放行', skipNoKey.action === 'accept' && skipNoKey.local === true && netCalls === 0, JSON.stringify(skipNoKey));
 
   resetAll(); setCfg(semanticCfg({ aiFallback: 'pause', aiDailyLimit: 0 }));
-  const waiting = BH.runAIGate(null, trainingDutyJob);
-  await waitForUI(() => BH.state._aiFailStreak >= 1, '额度耗尽进入等待');
-  ok('额度耗尽保留当前岗位，等待恢复且不发送请求', !BH.state.paused && netCalls === 0);
-  BH.state.config.aiDailyLimit = 100;
   netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"score":88,"reason":"技术培训是研发职责"}' } }] });
-  BH.state.paused = false;
-  const guard = setTimeout(() => { BH.state.stopFlag = true; BH.state.paused = false; }, 2000);
-  const recovered = await waiting;
-  clearTimeout(guard);
-  ok('提高额度后重新请求 AI，沿用正常结论',
+  const recovered = await BH.runAIGate(null, trainingDutyJob);
+  ok('旧零额度升级后直接请求 AI，不进入无效的一分钟额度等待',
      recovered.action === 'accept' && recovered.reason === '技术培训是研发职责' && netCalls === 1, JSON.stringify(recovered));
   resetAll();
 }

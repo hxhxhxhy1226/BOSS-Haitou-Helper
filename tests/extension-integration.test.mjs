@@ -52,6 +52,10 @@ function environment(t, options = {}) {
           return Object.fromEntries(names.filter((key) => Object.hasOwn(data, key)).map((key) => [key, clone(data[key])]));
         },
         async set(values) {
+          if (Object.hasOwn(values, STATS) && values[STATS].aiCalls > (data[STATS]?.aiCalls || 0)) {
+            if (options.failAICount === 'throw') throw Error('Simulated AI counter persistence failure');
+            if (options.failAICount === 'silent') return;
+          }
           if (Object.hasOwn(values, CONFIG)) {
             configAttempts++;
             if (configGate) await configGate;
@@ -245,6 +249,57 @@ test('missing AI host permission is visible through the complete native helper t
   assert.equal(page.win.BH.state.stopFlag, true);
   assert.equal(page.clicks(), 0);
 });
+
+for (const oldLimit of [0, 1, 100, 5000]) {
+  test(`native AI connection test after 175 attempts ignores legacy cap ${oldLimit} while preserving delivery cap 150`, async (t) => {
+    const f = environment(t, { config: { aiDailyLimit: oldLimit, dailyLimit: 150 } });
+    f.data[STATS] = { schema: 22, date: f.worker.stats(f.data).date, aiCalls: 175, sent: 149 };
+    const page = f.page(); await page.ready;
+    page.action('aiopen');
+    const result = await page.win.BH.testAIConnection();
+    assert.equal(result.ok, true, result.err);
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.worker.stats(f.data).aiCalls, 176);
+    assert.equal(page.win.BH.loadStats().aiCalls, 176);
+    assert.equal(page.win.BH.loadConfig().dailyLimit, 150);
+    assert.equal(page.win.BH.loadConfig().aiDailyLimit, null);
+    assert.equal(page.win.BH.state.stopFlag, true, 'An idle connection test never starts delivery');
+    assert.equal(page.clicks(), 0);
+    const slot = await page.win.BHNative.reserveDelivery('last-delivery-slot', 150);
+    assert.ok(slot);
+    assert.equal(await page.win.BHNative.reserveDelivery('over-delivery-limit', 150), false);
+    assert.equal(f.worker.stats(f.data).sent, 149);
+    assert.deepEqual(page.errors, []);
+  });
+}
+
+for (const failure of ['throw', 'silent']) {
+  test(`native AI counter ${failure} persistence failure stops locally without marking APIs unhealthy or retrying`, async (t) => {
+    const f = environment(t, { failAICount: failure, config: { aiEnabled: true, aiDailyLimit: 100,
+      aiEndpoints: [{ id: 'backup', enabled: true, baseUrl: 'https://backup.example/v1', apiKey: 'fixture-backup', model: 'fixture' }] } });
+    f.data[STATS] = { schema: 22, date: f.worker.stats(f.data).date, aiCalls: 175, sent: 0 };
+    const page = f.page(); await page.ready;
+    page.win.BH.state.stopFlag = false;
+    page.win.BH.state.running = true;
+    const result = await page.win.BH.runAIGate(null, { jobId: 'storage-failure', title: '嵌入式软件工程师', jd: '负责 STM32 固件和 FreeRTOS 开发。' });
+    assert.equal(result.action, 'stop');
+    assert.equal(result.storageFailure, true);
+    assert.match(result.reason, /调用记录无法保存/);
+    assert.doesNotMatch(result.reason, /次数超限/);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.worker.stats(f.data).aiCalls, 175);
+    assert.equal(page.win.BH.state.stopFlag, true);
+    assert.ok(page.win.BH.getAIEndpointHealth(page.win.BH.loadConfig()).every((endpoint) => endpoint.status === 'untested'));
+    assert.equal(page.win.BH.state._aiFailStreak || 0, 0);
+    assert.doesNotMatch(page.logs(), /全部 AI 接口不可用|一分钟后重试/);
+    assert.equal(page.clicks(), 0);
+    page.action('aiopen');
+    const connection = await page.win.BH.testAIConnection();
+    assert.equal(connection.storageFailure, true);
+    assert.match(page.doc.querySelector('#bh-detail-modal [data-role=body]').value, /本地调用记录保存失败，未发起接口请求/);
+    assert.equal(f.requests.length, 0);
+  });
+}
 
 test('two native helper tabs share saved rules and a single remaining delivery reservation', async (t) => {
   const f = environment(t), first = f.page(), second = f.page({ url: 'https://www.zhipin.cn/web/geek/job' });

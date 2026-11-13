@@ -185,7 +185,7 @@
     addStyle(css) { const style = document.createElement('style'); style.textContent = String(css); (document.head || document.documentElement).append(style); return style; },
     onChanged(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     onError(fn) { errorListeners.add(fn); if (lastError) fn(error(lastError)); return () => errorListeners.delete(fn); },
-    consumeAIDailyQuota: (limit) => quota('quota.consumeAI', { limit }),
+    consumeAIDailyQuota: () => quota('quota.consumeAI', {}),
     reserveDelivery: (jobId, limit) => quota('quota.reserve', { jobId, limit }),
     commitDelivery: (reservation, limit) => quota('quota.commit', { reservation, limit }),
     markDeliveryClicked: (reservation) => quota('quota.markClicked', { reservation }),

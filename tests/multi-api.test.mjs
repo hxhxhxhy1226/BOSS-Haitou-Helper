@@ -97,7 +97,7 @@ for (const failure of [
     const backupRequest = f.requests.find((req) => req.url === BACKUP);
     assert.equal(backupRequest.body.model, 'backup-model');
     assert.equal(backupRequest.headers.Authorization, 'Bearer sk-backup-fixture-secret');
-    assert.equal(f.BH.loadStats().aiCalls, f.postURLs().length, '失败尝试也计入每日请求上限');
+    assert.equal(f.BH.loadStats().aiCalls, f.postURLs().length, '失败尝试也计入每日统计');
     const next = await f.BH.aiScreen(job('next-job'));
     assert.equal(next.ok, true);
     assert.equal(f.postURLs().at(-1), BACKUP);
@@ -127,6 +127,24 @@ test('所有服务失败返回一分钟后的重试时间，不假造匹配结�
   assert.equal(f.postURLs().length, 2);
   assert.equal(f.BH.loadStats().aiCalls, 2);
 });
+
+for (const transport of ['gm', 'fetch']) {
+  test(`${transport} 服务商 HTTP 429/余额不足保留响应原因，并与本地存储和已取消的次数限制区分`, async (t) => {
+    const details = { error: { message: 'insufficient_quota: account balance exhausted' } };
+    const f = await fixture(t, { cfg: { aiDailyLimit: 0, aiEndpoints: [] },
+      gm: (o) => response(o, 429, details),
+      fetch: async () => ({ ok: false, status: 429, text: async () => JSON.stringify(details) }) });
+    const r = await f.BH.aiScreen(job(), { transport });
+    assert.equal(r.ok, false);
+    assert.equal(r.apiUnavailable, true);
+    assert.equal(r.storageFailure, undefined);
+    assert.equal(r.quotaExceeded, undefined);
+    assert.match(r.err, /HTTP 429.*insufficient_quota.*account balance exhausted/);
+    assert.equal(r.retryDelayMs, 60000);
+    assert.equal(f.requests.length, 1, 'Provider quota errors do not trigger immediate retries on the other transport');
+    assert.equal(f.BH.loadStats().aiCalls, 1);
+  });
+}
 
 test('失效诊断跨刷新保存，单轮巡检不漏掉任何启用接口', async (t) => {
   const store = new Map();
@@ -190,41 +208,42 @@ test('服务端错误回显密钥时诊断结果仍脱敏', async (t) => {
   assert.ok(!diagnostics.includes('sk-backup-fixture-secret'));
 });
 
-test('请求预算耗尽时禁止切换服务继续调用', async (t) => {
+test('旧 AI 上限为 1 时仍能完整尝试备用服务和下一轮', async (t) => {
   const f = await fixture(t, { cfg: { aiDailyLimit: 1, aiMaxRetries: 3 }, gm: (o) => response(o, 503, {}) });
   const r = await f.BH.aiScreen(job());
   assert.equal(r.ok, false);
-  assert.match(r.err, /次数超限|上限|预算/);
-  assert.deepEqual(f.postURLs(), [PRIMARY]);
-  assert.equal(f.BH.loadStats().aiCalls, 1);
+  assert.match(r.err, /HTTP 503/);
+  assert.equal(r.quotaExceeded, undefined);
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
+  assert.equal(f.BH.loadStats().aiCalls, 2);
   assert.equal((await f.BH.aiScreen(job('budget-exhausted'))).ok, false);
-  assert.equal(f.postURLs().length, 1);
+  assert.equal(f.postURLs().length, 4);
 });
 
-test('额度不足保留岗位，修改每日额度后立即重新从首项判断', async (t) => {
+test('旧上限不再阻止每分钟网络重试，恢复后仍从首项判断', async (t) => {
   const f = await fixture(t, { cfg: { aiDailyLimit: 1 }, gm: (o) => response(o, 503, {}) });
   const waiting = f.BH.runAIGate(null, job());
-  await until(() => f.BH.state._aiFailStreak >= 1, '额度不足进入等待');
-  assert.deepEqual(f.postURLs(), [PRIMARY], '每日额度不足不调用备用');
+  await until(() => f.BH.state._aiFailStreak >= 1, '真实 HTTP 故障进入等待');
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
   assert.equal(f.BH.state.paused, false);
   f.setGM((o) => response(o, 200, good()));
-  f.BH.state.config.aiDailyLimit = 2;
+  f.time.now += 60001;
   const gate = await waiting;
   assert.equal(gate.action, 'accept');
-  assert.deepEqual(f.postURLs(), [PRIMARY, PRIMARY]);
-  assert.equal(f.BH.loadStats().aiCalls, 2);
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP, PRIMARY]);
+  assert.equal(f.BH.loadStats().aiCalls, 3);
 });
 
-test('单 API GM 超时后 fetch 也独立计数，限额为 1 时禁止 fetch 重发', async (t) => {
+test('单 API GM 超时后 fetch 独立计数，旧限额为 1 不再阻断备用通道', async (t) => {
   const f = await fixture(t, { cfg: { aiDailyLimit: 1, aiEndpoints: [] }, gm: (o) => o.ontimeout(),
     fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(good()) }) });
   const r = await f.BH.aiScreen(job());
-  assert.equal(r.ok, false);
-  assert.equal(f.requests.filter((req) => req.transport === 'fetch').length, 0);
-  assert.equal(f.BH.loadStats().aiCalls, 1);
+  assert.equal(r.ok, true);
+  assert.equal(f.requests.filter((req) => req.transport === 'fetch').length, 1);
+  assert.equal(f.BH.loadStats().aiCalls, 2);
 });
 
-test('单 API GM 到 fetch 成功时两个 POST 都消耗预算', async (t) => {
+test('单 API GM 到 fetch 成功时两个 POST 都保留尝试统计', async (t) => {
   const f = await fixture(t, { cfg: { aiDailyLimit: 2, aiEndpoints: [] }, gm: (o) => o.ontimeout(),
     fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(good()) }) });
   const r = await f.BH.aiScreen(job());

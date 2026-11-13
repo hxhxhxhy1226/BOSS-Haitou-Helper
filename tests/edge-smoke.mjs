@@ -5,6 +5,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { inspectBrowserMemory } from './edge-memory-fixture.mjs';
 
 // fileURLToPath preserves spaces and non-ASCII Windows workspace names.
 const { fileURLToPath } = await import('node:url');
@@ -191,8 +192,12 @@ try {
   check((await evaluate(workerSession, 'chrome.runtime.getManifest().version')) === extensionVersion, 'Edge 实际加载 Manifest V3 扩展与后台');
   const target = await send('Target.createTarget', { url: 'about:blank' });
   const page = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
+  const pageContexts = new Map();
   handlers.add((event) => {
     if (event.sessionId !== page) return;
+    if (event.method === 'Runtime.executionContextCreated') pageContexts.set(event.params.context.id, event.params.context);
+    if (event.method === 'Runtime.executionContextDestroyed') pageContexts.delete(event.params.executionContextId);
+    if (event.method === 'Runtime.executionContextsCleared') pageContexts.clear();
     if (event.method === 'Runtime.exceptionThrown') pageErrors.push(event.params.exceptionDetails.exception?.description || event.params.exceptionDetails.text);
     if (event.method === 'Fetch.requestPaused') {
       const { requestId, resourceType, request } = event.params;
@@ -312,9 +317,10 @@ try {
   await evaluate(workerSession, `chrome.tabs.sendMessage(${bossTabId},{type:'BH_UI',action:'stop'})`);
   const listShot = await send('Page.captureScreenshot', { format: 'png' }, page);
   await fs.writeFile(path.join(output, 'edge-extension-list-loading.png'), Buffer.from(listShot.data, 'base64'));
+  const memoryVerification = await inspectBrowserMemory({ send, evaluate, page, contexts: pageContexts, check });
   check(pageErrors.length === 0, '真实内容脚本无未捕获页面异常');
   await fs.writeFile(path.join(output, 'edge-extension-report.json'), JSON.stringify({ status: 'passed', checks, pageErrors,
-    extensionVersion, apiPermissionVerification, modelFixtureRequests, blockedWorkerRequests,
+    extensionVersion, apiPermissionVerification, modelFixtureRequests, blockedWorkerRequests, memoryVerification,
     browser: await send('Browser.getVersion') }, null, 2));
 } catch (error) {
   await fs.writeFile(path.join(output, 'edge-extension-failure.log'), String(error.stack) + '\n' + browserLog);

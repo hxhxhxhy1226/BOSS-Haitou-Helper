@@ -82,7 +82,8 @@ test('GM 异常时使用 localStorage，刷新后继续累计', async (t) => {
   assert.equal(await b.BH.consumeAIDailyQuota(32), true);
   const c = fixture(t, { failGM: true, local });
   assert.equal(c.BH.loadStats().aiCalls, 32);
-  assert.equal(await c.BH.consumeAIDailyQuota(32), false);
+  assert.equal(await c.BH.consumeAIDailyQuota(32), true);
+  assert.equal(c.BH.loadStats().aiCalls, 33);
 });
 
 test('GM 与本地副本不一致时保留较大额度，旧快照不能覆盖新计数', async (t) => {
@@ -202,14 +203,14 @@ test('同一职位当日防重复；未点击预留过期后可重试', async (t
   assert.equal(f.BH.loadStats().sent, 1);
 });
 
-test('每次 AI 实际请求都占额度，并发不会超限', async (t) => {
+test('AI 调用尝试持续计数，并发超过旧上限不会漏记', async (t) => {
   const gm = new Map(), local = new Map(), locks = webLocks();
   const a = fixture(t, { gm, local, locks }), b = fixture(t, { gm, local, locks });
   seed(a, { aiCalls: 119 });
   const result = await Promise.all([a.BH.consumeAIDailyQuota(120), b.BH.consumeAIDailyQuota(120)]);
-  assert.deepEqual(result.sort(), [false, true]);
-  assert.equal(a.BH.loadStats().aiCalls, 120);
-  assert.equal(b.BH.resetStats().aiCalls, 120);
+  assert.deepEqual(result, [true, true]);
+  assert.equal(a.BH.loadStats().aiCalls, 121);
+  assert.equal(b.BH.resetStats().aiCalls, 121);
 });
 
 test('没有 GM_listValues 的兼容环境仍通过持久化索引恢复条目', async (t) => {
@@ -231,6 +232,21 @@ test('GM 与 localStorage 均不可写时禁止投递和 AI 付费请求', async
   assert.equal(f.BH.loadStats().sent, 0);
 });
 
+test('兼容存储全部不可写时返回本地存储错误并停止，不进入接口一分钟重试循环', async (t) => {
+  const f = fixture(t, { failGM: true, failLocal: true });
+  f.BH.state.config = { ...f.BH.loadConfig(), aiEnabled: true, aiDailyLimit: 0, aiCacheEnabled: false,
+    aiBaseUrl: 'https://api.fixture.example/v1', aiApiKey: 'fixture-key', aiModel: 'fixture-model' };
+  f.BH.state.stopFlag = false;
+  const result = await f.BH.runAIGate(null, { jobId: 'local-storage-failure', title: '嵌入式软件', jd: 'STM32 固件研发。' });
+  assert.equal(result.action, 'stop');
+  assert.equal(result.storageFailure, true);
+  assert.match(result.reason, /调用记录无法保存/);
+  assert.doesNotMatch(result.reason, /次数超限/);
+  assert.equal(f.BH.state.stopFlag, true);
+  assert.equal(f.BH.state._aiFailStreak || 0, 0);
+  assert.ok(f.BH.getAIEndpointHealth(f.BH.state.config).every((item) => item.status === 'untested'));
+});
+
 test('每日清理只移除七天前的额度日记，保留今日、近期与其他配置', async (t) => {
   const clock = { offset: Date.parse('2026-11-10T12:00:00Z') - Date.now() };
   const f = fixture(t, { clock });
@@ -248,7 +264,7 @@ test('每日清理只移除七天前的额度日记，保留今日、近期与�
   assert.equal(f.BH.loadStats().aiCalls, 1);
 });
 
-test('无 Web Locks 时多个跨域标签反复并发消费仍不会超出最后四个 AI 名额', async (t) => {
+test('无 Web Locks 时多个跨域标签在旧 AI 上限以上仍完整累计尝试次数', async (t) => {
   const gm = new Map();
   const tabs = Array.from({ length: 6 }, (_, i) => fixture(t, {
     gm, locks: null, url: `https://www.zhipin.${i % 2 ? 'cn' : 'com'}/web/geek/job`,
@@ -259,8 +275,8 @@ test('无 Web Locks 时多个跨域标签反复并发消费仍不会超出最后
     for (let i = 0; i < 3; i++) if (await tab.BH.consumeAIDailyQuota(120)) used++;
     return used;
   }));
-  assert.equal(rounds.reduce((a, b) => a + b, 0), 4);
-  for (const tab of tabs) assert.equal(tab.BH.loadStats().aiCalls, 120);
+  assert.equal(rounds.reduce((a, b) => a + b, 0), 18);
+  for (const tab of tabs) assert.equal(tab.BH.loadStats().aiCalls, 134);
 });
 
 test('真实详情流程：119→120 在最后一次点击前持久化，重新打开和第二标签均被日限拦截', { timeout: 10000 }, async (t) => {

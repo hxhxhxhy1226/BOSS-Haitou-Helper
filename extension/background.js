@@ -100,12 +100,17 @@ function createBossNativeBackground(api, dependencies = {}) {
     return serial(async () => {
       const values = await allValues();
       await prune(values);
-      const current = stats(values);
+      const current = action === 'quota.consumeAI' ? null : stats(values);
       let value = false;
       if (action === 'quota.consumeAI') {
-        if (current.aiCalls < maximum(values, message.limit, 'aiDailyLimit', 100)) {
-          value = !!await append(values, { date: day(), kind: 'ai', status: 'dispatched', ts: now() });
-        }
+        // Keep durable attempt counts; legacy saved/requested AI caps no longer block calls.
+        // This worker already serializes writes, so a counter avoids an ever-growing AI
+        // journal/index. stats() still adds old AI events, preserving upgrade history.
+        const currentBase = base(values);
+        const next = { ...currentBase, aiCalls: currentBase.aiCalls + 1 };
+        await persist({ [STATS]: next });
+        values[STATS] = next;
+        value = true;
       } else if (action === 'quota.reserve') {
         const hash = message.jobId ? jobHash(message.jobId) : '';
         const duplicate = hash && events(values).some((item) => item.kind === 'sent' && item.jobHash === hash

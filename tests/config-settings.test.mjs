@@ -131,11 +131,12 @@ test('numeric bounds, integer fields, reversed delay ranges and legal zero value
     assert.equal(f.input(key).value, String(expected), key + ' display');
   }
   f.action('aiopen');
-  f.ai('aiDailyLimit').value = '0';
+  assert.equal(f.ai('aiDailyLimit'), null);
   f.ai('aiTimeoutMs').value = '1';
   f.ai('aiMaxJDChars').value = '90000';
   await f.action('aisave');
-  assert.equal(f.store.get(CONFIG).aiDailyLimit, 0);
+  assert.equal(f.store.get(CONFIG).aiDailyLimit, null);
+  assert.equal(f.doc.querySelector('[data-role=ai-unlimited]').textContent, '不限');
   assert.equal(f.ai('aiTimeoutMs').value, '3000');
   assert.equal(f.ai('aiMaxJDChars').value, '20000');
 });
@@ -211,7 +212,7 @@ test('AI fields save and reload, main saves preserve them, and rule edits invali
   f.action('aiopen');
   const strings = { aiBaseUrl: 'https://updated.example/v1', aiApiKey: 'updated-fixture', aiModel: 'updated-model',
     aiUserPortrait: '固件研发，只投本科以下', aiPromptTemplate: 'Return JSON', aiFallback: 'pause',
-    aiDailyLimit: '25', aiTimeoutMs: '15000', aiMaxJDChars: '4000' };
+    aiTimeoutMs: '15000', aiMaxJDChars: '4000' };
   for (const [key, value] of Object.entries(strings)) f.ai(key).value = value;
   for (const key of ['aiEnabled', 'aiPrimaryEnabled']) f.ai(key).checked = true;
   for (const key of ['aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts']) f.ai(key).checked = false;
@@ -327,7 +328,7 @@ for (const customSystem of ['', '用户自定义输出要求：依据候选人�
   });
 }
 
-test('daily limit reduced during a failed round blocks the next round', async (t) => {
+test('legacy AI cap changed to zero during a failed round does not block the next round', async (t) => {
   const f = await fixture(t, { ...primary, aiEnabled: true, aiDailyLimit: 100, aiMaxRetries: 0 }, {
     request(win, request) {
       win.BH.applyConfig({ ...win.BH.state.config, aiDailyLimit: 0 });
@@ -343,10 +344,26 @@ test('daily limit reduced during a failed round blocks the next round', async (t
   assert.match(result.err, /HTTP 503/);
   const next = await f.BH.aiScreen({ title: '测试岗位', jobId: 'quota-next-round', jd: '负责设备控制软件开发。' });
   assert.equal(next.ok, false);
-  assert.equal(next.quotaExceeded, true);
-  assert.match(next.err, /AI次数超限/);
-  assert.equal(f.requests.length, 1, '最新额度禁止下一轮新增网络请求');
+  assert.equal(next.apiUnavailable, true);
+  assert.equal(next.quotaExceeded, undefined);
+  assert.match(next.err, /HTTP 503/);
+  assert.equal(f.requests.length, 2, '旧 AI 上限不阻断下一轮真实网络请求');
+  assert.equal(f.BH.state.config.aiDailyLimit, null);
 });
+
+for (const oldLimit of [0, 100, 73]) {
+  test(`旧 AI 上限 ${oldLimit} 自动迁移为不限，投递上限 150 保留`, async (t) => {
+    const f = await fixture(t, { ...primary, aiEnabled: true, aiDailyLimit: oldLimit, dailyLimit: 150 });
+    assert.equal(f.BH.loadConfig().aiDailyLimit, null);
+    assert.equal(f.BH.loadConfig().dailyLimit, 150);
+    await f.action('aiopen');
+    assert.equal(f.ai('aiDailyLimit'), null);
+    assert.equal(f.doc.querySelector('[data-role=ai-unlimited]').textContent, '不限');
+    await f.action('aisave');
+    assert.equal(f.store.get(CONFIG).aiDailyLimit, null);
+    assert.equal(f.store.get(CONFIG).dailyLimit, 150);
+  });
+}
 
 const cards = '<ul class="job-list-wrapper"><li class="job-card-box" data-jobid="schedule-first"><a class="job-name" href="/job_detail/schedule-first.html">测试岗位</a></li></ul>';
 test('one round remains one round after Start; batch size and pause reach the actual loop timer', async (t) => {

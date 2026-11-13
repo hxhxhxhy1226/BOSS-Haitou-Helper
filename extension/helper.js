@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.10 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.11 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -120,9 +120,9 @@
         //    若 Worker 被限速/挂掉，它保证 sleep 最终一定会结束。
         setTimeout(() => { if (timers.delete(id)) resolve(); }, ms);
 
-        // Worker 没建起来（老浏览器 / CSP 拦 blob:）→ 用 MessageChannel 补最后 500ms 的精度。
-        // 有 Worker 时不走这条路，交给 tick 即可。
-        if (!workerAlive) {
+        // 非原生兼容环境的 Worker 创建失败时保留旧兜底。
+        // MV3 明确使用原生定时器；未创建 Worker 是预期，不能因此持续自发消息占满主线程。
+        if (!native && !workerAlive) {
           const spinWindow = Math.min(ms, 500);
           setTimeout(() => {
             if (!timers.has(id)) return;
@@ -269,6 +269,9 @@
   const JOB_LIST_SEL = '.job-list-wrapper, .job-list, .job-list-box, .search-job-result, .job-box, .recommend-job-list, .job-list-container';
 
   function collectJobCards(root = document) {
+    return withDOMReadCache(() => collectJobCardsUncached(root));
+  }
+  function collectJobCardsUncached(root) {
     let nodes = [...root.querySelectorAll(JOB_CARD_SEL)];
     // 混合新旧结构时也扫描列表内的旧卡片，不把右侧带 data-jobid 的详情当岗位。
     for (const list of root.querySelectorAll(JOB_LIST_SEL)) nodes.push(...list.querySelectorAll('[data-jobid], .job-primary'));
@@ -377,17 +380,38 @@
   const JD_RECOMMEND_HEADING_RE = /^(推荐职位|相关推荐|相似职位|相关职位|热门职位|你可能感兴趣|猜你喜欢)$/;
   const JD_BLOCK_TAG_RE = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|H[1-6]|HEADER|HR|LI|MAIN|OL|P|PRE|SECTION|TABLE|TBODY|TD|TH|THEAD|TR|UL)$/;
 
+  // Reuse layout/style reads only within one synchronous inspection. A new
+  // snapshot always starts fresh, so visibility and job changes are never stale.
+  let domReadCache = null;
+  function withDOMReadCache(read) {
+    if (domReadCache) return read();
+    domReadCache = { styles: new WeakMap(), readable: new WeakMap(), visible: new WeakMap() };
+    try { return read(); } finally { domReadCache = null; }
+  }
+  function readComputedStyle(el) {
+    if (!domReadCache) return getComputedStyle(el);
+    if (!domReadCache.styles.has(el)) domReadCache.styles.set(el, getComputedStyle(el));
+    return domReadCache.styles.get(el);
+  }
+  function isNodeReadable(node) {
+    if (node.hidden || String(node.getAttribute('aria-hidden') || '').trim().toLowerCase() === 'true') return false;
+    try {
+      const style = readComputedStyle(node);
+      const opacity = String(style.opacity || '').trim();
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+        && !(opacity !== '' && Number(opacity) === 0);
+    } catch (_) { return true; }
+  }
   // 正文不要求位于视口内；折叠/隐藏的自身或祖先才不可读。
   function isReadableElement(el) {
     if (!el || el.nodeType !== 1) return false;
+    if (domReadCache) {
+      if (!domReadCache.readable.has(el)) domReadCache.readable.set(el,
+        (!el.parentElement || isReadableElement(el.parentElement)) && isNodeReadable(el));
+      return domReadCache.readable.get(el);
+    }
     for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
-      if (node.hidden || String(node.getAttribute('aria-hidden') || '').trim().toLowerCase() === 'true') return false;
-      try {
-        const style = getComputedStyle(node);
-        const opacity = String(style.opacity || '').trim();
-        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
-          || (opacity !== '' && Number(opacity) === 0)) return false;
-      } catch (_) { /* 未布局的元素仍可有可读取的正文。 */ }
+      if (!isNodeReadable(node)) return false;
     }
     return true;
   }
@@ -701,6 +725,9 @@
   }
 
   function readJobCard(card) {
+    return withDOMReadCache(() => readJobCardUncached(card));
+  }
+  function readJobCardUncached(card) {
     const fields = {
       ...readJobCardIdentity(card),
       location: fieldText(card, ['.job-area', '.job-location', '.job-area-wrapper', '.city-name'], true),
@@ -757,8 +784,26 @@
       + '.job-card-body.active, .job-card-body.selected, .job-card-body[aria-selected="true"], '
       + '.job-title.active, .job-title.selected, .job-title[aria-selected="true"], '
       + '.job-name.active, .job-name.selected, .job-name[aria-selected="true"]';
-    const cards = collectJobCards().filter((card) => isReadableElement(card)
-      && (card.matches('.active, .selected, [aria-selected="true"]') || card.querySelector(innerSelected)));
+    // Query selection markers first. Reading every unselected card's styles on
+    // each identity check makes a long result list block the browser UI.
+    const selected = '.active, .selected, [aria-selected="true"]';
+    const cardSelectors = JOB_CARD_SEL.split(',').map((selector) => selector.trim());
+    const selectedRoots = [...cardSelectors, '[data-jobid]', '.job-primary']
+      .flatMap((selector) => selected.split(',').map((state) => selector + state.trim()));
+    const candidates = new Set();
+    for (const node of document.querySelectorAll(selectedRoots.join(',') + ',' + innerSelected)) {
+      let card = node.closest(JOB_CARD_SEL);
+      if (card) {
+        for (let parent = card.parentElement?.closest(JOB_CARD_SEL); parent; parent = card.parentElement?.closest(JOB_CARD_SEL)) card = parent;
+      } else {
+        card = node.closest('[data-jobid], .job-primary');
+        if (!card || !card.closest(JOB_LIST_SEL) && document.querySelector(JOB_CARD_SEL)) continue;
+        for (let parent = card.parentElement?.closest('[data-jobid], .job-primary'); parent && parent.closest(JOB_LIST_SEL);
+          parent = card.parentElement?.closest('[data-jobid], .job-primary')) card = parent;
+      }
+      if (!card.closest('#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, ' + DETAIL_ROOT_SEL) && isReadableElement(card)) candidates.add(card);
+    }
+    const cards = [...candidates];
     return cards.length === 1 ? (identityOnly ? readJobCardIdentity(cards[0]) : readJobCard(cards[0])) : null;
   }
 
@@ -879,6 +924,9 @@
   }
 
   function extractJobSnapshot(expected, { identityOnly = false } = {}) {
+    return withDOMReadCache(() => readJobSnapshot(expected, identityOnly));
+  }
+  function readJobSnapshot(expected, identityOnly) {
     const selected = selectedCardIdentity(identityOnly);
     const pageJobId = isDetailPage() ? publicJobId(location.href) : '';
     const target = expected || (isDetailPage() ? { jobId: pageJobId } : selected);
@@ -1262,7 +1310,7 @@
     aiTimeoutMs: 20000,          // 单次调用超时
     aiMaxRetries: 1,             // 失败重试次数（仅网络类错误重试）
     aiFallback: 'local',         // 兼容旧配置；接口故障统一等待一分钟重试，未配置时使用完整本地规则
-    aiDailyLimit: 100,           // 每日 AI 调用次数上限（控成本）
+    aiDailyLimit: null,          // 兼容旧配置字段；插件不限制 AI 调用次数
     aiMaxJDChars: 2500,          // 送入 AI 的 JD 最大字符数（截断，控 token）
     aiUserPortrait: '',          // 用户画像（自然语言）
     aiPromptTemplate: '',        // 可选：自定义 prompt 模板，空则用内置默认
@@ -1336,7 +1384,7 @@
     numeric('maxRounds', 0, 999, true);
     numeric('batchSize', 1, 100, true);
     numeric('batchPauseSec', 0, 600, true);
-    numeric('aiDailyLimit', 0, 5000, true);
+    cfg.aiDailyLimit = null; // 旧的 0、100 等上限统一迁移为不限，不能继续阻断请求。
     numeric('aiTimeoutMs', 3000, 120000, true);
     numeric('aiMaxJDChars', 300, 20000, true);
     numeric('aiTemperature', 0, 2);
@@ -1613,11 +1661,10 @@
     if (!writeDailyValue(key, event) || !writeDailyValue(indexKey, { keys: [...keys] })) return null;
     return { ...event, key };
   }
-  async function consumeAIDailyQuota(limit) {
-    if (native) { await native.flush(); return native.consumeAIDailyQuota(limit); }
+  async function consumeAIDailyQuota() {
+    if (native) { await native.flush(); return native.consumeAIDailyQuota(); }
     return !!(await withDailyStatsLock(() => {
       const s = loadStats();
-      if (s.aiCalls >= countValue(limit)) return false;
       return appendDailyEvent({ date: s.date, kind: 'ai', status: 'dispatched', ts: Date.now() });
     }));
   }
@@ -2167,10 +2214,17 @@
   // 元素是否真的"对用户可见"：offsetParent 会被 fixed 浮层坑，所以用 getBoundingClientRect
   function isVisible(el) {
     if (!el) return false;
+    if (domReadCache) {
+      if (!domReadCache.visible.has(el)) domReadCache.visible.set(el, isVisibleUncached(el));
+      return domReadCache.visible.get(el);
+    }
+    return isVisibleUncached(el);
+  }
+  function isVisibleUncached(el) {
     if (el.offsetWidth === 0 && el.offsetHeight === 0) return false;
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
-    const cs = getComputedStyle(el);
+    const cs = readComputedStyle(el);
     if (cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0) return false;
     return true;
   }
@@ -3844,7 +3898,7 @@
         '',
         '=== AI 筛选 ===',
         `AI 模式: ${cfg.aiEnabled ? '开启（排除词按上下文判断；学历/年限仅按求职画像；活跃度本地硬卡）' : '关闭（本地规则，技术别名与明确上下文匹配）'}`,
-        `今日 AI 调用: ${stats.aiCalls || 0} / ${cfg.aiDailyLimit || 0}`,
+        `今日 AI 调用尝试: ${stats.aiCalls || 0}（不限次数）`,
         `AI 缓存命中: ${stats.aiHits || 0} 次（缓存条目 ${aiCacheSize()} 条，有效期 ${cfg.aiCacheDays || 7} 天）`,
         `当前生效筛选模式: ${cfg.aiEnabled ? 'aiSoftCriteria=true（必含词 + 排除词 + 薪资 为 AI 语义判断；学历/年限仅按求职画像；活跃度本地硬卡）' : 'aiSoftCriteria=false（本地硬卡：必含词 + 排除词 + 年限/学历/薪资/活跃度）'}`,
         `AI 判断标准: ${describeAISoftCriteria(cfg)}`,
@@ -4164,17 +4218,17 @@
             </div>
             <div class="bh-ai-row">
               <div class="meta">
-                <div class="lbl">AI 每日上限</div>
-                <div class="desc">所有 API 共用当日次数上限；测试、失败请求和重试也计入次数，刷新后保留</div>
+                <div class="lbl">AI 调用次数</div>
+                <div class="desc">插件不限次数，仅统计调用尝试次数（含测试、失败和重试），刷新后保留。服务商自身的限流或余额限制仍适用。</div>
               </div>
               <div class="control">
-                <input class="bh-ai-num" type="number" min="0" max="5000" data-cfg="aiDailyLimit" />
+                <span class="value" data-role="ai-unlimited">不限</span>
               </div>
             </div>
             <div class="bh-ai-row">
               <div class="meta">
                 <div class="lbl">接口故障处理</div>
-                <div class="desc">全部失败后每分钟重试全部接口；请求达到每日上限时仍保留当前岗位，等待额度恢复或修改设置。未配置 AI 时复核完整本地条件。</div>
+                <div class="desc">接口或网络全部失败后每分钟重试；本地存储失败会停止并提示修复，不重复尝试接口。未配置 AI 时复核完整本地条件。</div>
               </div>
               <div class="control">
                 <select class="bh-ai-select" data-cfg="aiFallback" hidden aria-hidden="true">
@@ -4430,7 +4484,7 @@
   function aiSettingsSnapshot(input) {
     const cfg = normalizeConfig(input);
     const text = (value) => String(value ?? '').trim();
-    const keys = ['aiEnabled', 'aiPrimaryEnabled', 'aiFallback', 'aiDailyLimit',
+    const keys = ['aiEnabled', 'aiPrimaryEnabled', 'aiFallback',
       'aiTimeoutMs', 'aiMaxJDChars', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts'];
     const snapshot = Object.fromEntries(keys.map((key) => [key, cfg[key]]));
     snapshot.aiBaseUrl = normalizeChatUrl(cfg.aiBaseUrl);
@@ -4605,7 +4659,6 @@
     set('aiApiKey', cfg.aiApiKey || '');
     set('aiUserPortrait', cfg.aiUserPortrait || '');
     set('aiPromptTemplate', cfg.aiPromptTemplate || '');
-    set('aiDailyLimit', cfg.aiDailyLimit ?? DEFAULT_CONFIG.aiDailyLimit);
     set('aiTimeoutMs', cfg.aiTimeoutMs ?? DEFAULT_CONFIG.aiTimeoutMs);
     set('aiMaxJDChars', cfg.aiMaxJDChars ?? DEFAULT_CONFIG.aiMaxJDChars);
     setChk('aiCacheEnabled', cfg.aiCacheEnabled !== false);
@@ -4669,7 +4722,7 @@
     cfg.aiUserPortrait   = g('aiUserPortrait')   ? gv('aiUserPortrait')   : (prev.aiUserPortrait   || '');
     cfg.aiPromptTemplate = g('aiPromptTemplate') ? gv('aiPromptTemplate') : (prev.aiPromptTemplate || '');
     cfg.aiFallback = g('aiFallback') ? g('aiFallback').value : (prev.aiFallback || 'local');
-    cfg.aiDailyLimit  = g('aiDailyLimit')  ? Math.max(0, num(gv('aiDailyLimit'),  DEFAULT_CONFIG.aiDailyLimit))  : (prev.aiDailyLimit  ?? DEFAULT_CONFIG.aiDailyLimit);
+    cfg.aiDailyLimit = null;
     cfg.aiTimeoutMs   = g('aiTimeoutMs')   ? Math.max(1000, num(gv('aiTimeoutMs'),   DEFAULT_CONFIG.aiTimeoutMs))   : (prev.aiTimeoutMs   ?? DEFAULT_CONFIG.aiTimeoutMs);
     cfg.aiMaxJDChars  = g('aiMaxJDChars')  ? Math.max(200, num(gv('aiMaxJDChars'),  DEFAULT_CONFIG.aiMaxJDChars))  : (prev.aiMaxJDChars  ?? DEFAULT_CONFIG.aiMaxJDChars);
     cfg.aiCacheEnabled = g('aiCacheEnabled') ? gc('aiCacheEnabled') : (prev.aiCacheEnabled !== false);
@@ -5025,18 +5078,19 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     if (fingerprint && aiCacheFingerprint() !== fingerprint) {
       return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
     }
-    const currentLimit = () => countValue(fingerprint ? getAIConfig().aiDailyLimit : cfg.aiDailyLimit);
-    const quota = await consumeAIDailyQuota(currentLimit());
-    // 领取额度期间也可能按了停止；额度保守保留，但不继续发送。
+    let recorded;
+    try { recorded = await consumeAIDailyQuota(); }
+    catch (error) {
+      return { ok: false, storageFailure: true, err: 'AI 调用记录无法保存，请刷新页面并检查扩展存储：' + safeAIError(error?.message || error, cfg) };
+    }
+    if (!recorded) return { ok: false, storageFailure: true, err: 'AI 调用记录无法保存，请刷新页面并检查扩展存储' };
+    // 记录调用尝试期间也可能按了停止；保留统计，但不继续发送。
     while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
     if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
     if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
-    if (!quota) return { ok: false, quotaExceeded: true,
-      err: !statsPersistenceAvailable() ? 'AI 计数无法持久化，已停止请求' : 'AI次数超限' };
     if (fingerprint && aiCacheFingerprint() !== fingerprint) {
       return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
     }
-    if (loadStats().aiCalls > currentLimit()) return { ok: false, quotaExceeded: true, err: 'AI次数超限（已按最新上限取消请求）' };
     return { ok: true };
   }
 
@@ -5399,7 +5453,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
             const st = res.status;
             const raw = String(res.responseText || '');
             const retryAfter = retryAfterMs(/(?:^|\n)retry-after:\s*([^\r\n]+)/i.exec(res.responseHeaders || '')?.[1]);
-            if (st >= 500 || st === 429) return done({ ok: false, err: 'HTTP ' + st, retryable: true, status: st, retryAfterMs: retryAfter });
+            if (st >= 500 || st === 429) return done({ ok: false, err: safeAIError(aiHttpErr(st, raw), cfg), retryable: true, status: st, retryAfterMs: retryAfter });
             if (st < 200 || st >= 300) return done({ ok: false, err: safeAIError(aiHttpErr(st, raw), cfg), retryable: false, status: st });
             const text = extractContent(raw);
             if (text) return done({ ok: true, text });
@@ -5634,7 +5688,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         signal: ctrl ? ctrl.signal : undefined,
       });
       const raw = await r.text();
-      if (r.status >= 500 || r.status === 429) return { ok: false, err: 'HTTP ' + r.status, retryable: true, status: r.status,
+      if (r.status >= 500 || r.status === 429) return { ok: false, err: safeAIError(aiHttpErr(r.status, raw), cfg), retryable: true, status: r.status,
         retryAfterMs: retryAfterMs(r.headers?.get?.('Retry-After')) };
       if (!r.ok) return { ok: false, err: safeAIError(aiHttpErr(r.status, raw), cfg), retryable: false, status: r.status };
       const text = extractContent(raw);
@@ -5891,13 +5945,8 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       }
     }
 
-    // 2) 每日次数上限
-    const s0 = loadStats();
-    if ((s0.aiCalls || 0) >= (cfg.aiDailyLimit || 0)) {
-      return { ok: false, quotaExceeded: true, err: 'AI次数超限' };
-    }
-
-    // 3) 调用（含重试）。冻结本次规则，防止等待期间切换盲投后误用旧结论。
+    // 2) 调用并记录尝试次数，不受旧配置的 AI 日上限影响。
+    // 冻结本次规则，防止等待期间切换盲投后误用旧结论。
     const requestFingerprint = aiCacheFingerprint(cfg);
     const messages = [
       { role: 'system', content: [
@@ -5929,10 +5978,13 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       addLog(`🤖 准备调用 ${endpoint.name}：${title} | 职位ID ${jobId || '(未提供)'} | 画像 ${String(cfg.aiUserPortrait || '').trim().length} 字 | JD ${preparedJD.text.length} 字`, 'info',
         safeAIError(requestDetail, cfg, requestDetail.length));
       const r = await callLLM(messages, opts?.transport, endpointConfig(cfg, endpoint), testingDraft ? null : requestFingerprint, candidates.length > 1);
+      // Native storage reporting may already have stopped the run. Preserve the
+      // local failure cause instead of turning it into a generic cancellation.
+      if (r.storageFailure) return r;
       while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
       if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
       if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
-      if (r.quotaExceeded || r.cancelled || r.policyChanged || r.inputChanged) return r;
+      if (r.storageFailure || r.cancelled || r.policyChanged || r.inputChanged) return r;
       if (r.ok) {
         const p = parseAIResult(r.text);
         if (p.ok) {
@@ -6009,7 +6061,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     const hasGM = typeof bridge.GM_xmlhttpRequest === 'function';
     const rGM = hasGM ? await run('gm') : null;
     // GM 不通就再试 fetch（CORS 可能拦，但值得一试）
-    const rFetch = (!native && (!rGM || !rGM.ok)) ? await run('fetch') : null;
+    const rFetch = (!native && !rGM?.storageFailure && (!rGM || !rGM.ok)) ? await run('fetch') : null;
     const best = (rGM && rGM.ok) ? rGM : (rFetch && rFetch.ok) ? rFetch : (rGM || rFetch);
 
     const usedEndpoint = endpoints.find((e) => e.id === best?.endpointId);
@@ -6031,13 +6083,16 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       `超时设置: ${cfg.aiTimeoutMs || 20000} ms`,
       '',
       '--- 通道探测 ---',
-      ...(native ? [line('扩展后台', rGM)] : [line('GM_xmlhttpRequest', rGM), line('fetch', rFetch)]),
+      ...(native ? [line('扩展后台', rGM)] : [line('GM_xmlhttpRequest', rGM),
+        rGM?.storageFailure ? 'fetch：（本地调用记录保存失败，未发起请求）' : line('fetch', rFetch)]),
       '',
       best && best.ok
         ? `✅ 结论：可用通道 = ${best.transport}\n\n判定: ${best.match ? '匹配(match=true)' : '不匹配(match=false)'}\n分数: ${best.score ?? '-'}\n理由: ${best.reason || '(空)'}\n\n--- 原始返回 ---\n${best.raw || '(无)'}`
+        : best?.storageFailure ? `❌ 本地调用记录保存失败，未发起接口请求\n${best.err}\n\n请刷新 BOSS 页面并检查扩展存储后再试。`
         : `${native ? '❌ 扩展后台请求失败' : '❌ 两条通道都失败'}\n最后错误: ${best ? best.err : '(未知)'}\n\n` +
           (/401|Invalid token/i.test(best?.err || '') ? '👉 401：端点是对的，是 Key 无效 / 过期 / 与该接口产品不匹配。\n' : '') +
           (/404/.test(best?.err || '') ? '👉 404：接口路径不对，请确认是否 .../v1/chat/completions。\n' : '') +
+          (/429/.test(best?.err || '') ? '👉 429：服务商限流或账户配额不足，请按服务商返回信息检查。插件本地 AI 次数不限。\n' : '') +
           (/超时|timeout/i.test(best?.err || '')
             ? '👉 超时：接口未及时响应，请检查网络和接口授权。\n' +
               '   点击工具栏助手图标可选择一次授权，后续新增 API 无需重复；也可仅授权已保存域名。\n' +
@@ -6115,7 +6170,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     refreshBgState();
     if (cfg.aiEnabled) {
       const endpoints = getAIEndpoints(cfg);
-      addLog(`🤖 AI 筛选已开启 | ${endpoints.length} 个已启用 API，按顺序切换，全部失败一分钟后重试 | 上限 ${cfg.aiDailyLimit} 次/日（含失败与重试） | 缓存 ${cfg.aiCacheEnabled ? '开' : '关'}`);
+      addLog(`🤖 AI 筛选已开启 | ${endpoints.length} 个已启用 API，按顺序切换，接口全部失败一分钟后重试 | 调用次数不限（统计尝试次数） | 缓存 ${cfg.aiCacheEnabled ? '开' : '关'}`);
       if (!endpoints.some((e) => !endpointError(e))) addLog('⚠ 没有配置完整且已启用的 API：将复核全部本地条件', 'err');
       if (!String(cfg.aiUserPortrait || '').trim()) addLog('⚠ 未填求职画像：AI 判断会更保守，建议填写', 'err');
       // v1.0.11：画像写着"应届/校招"，但「规则设置 → 年限」还是 ≥N 年 —— 两组标准互相矛盾，
@@ -6346,7 +6401,6 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
   // 接口暂时不可用时保留当前岗位，每分钟重新巡检，暂停/停止/修改配置即时生效。
   async function waitForAIRetry(card, job, fingerprint, retryAt, isCurrentInput) {
     const countdown = panel?.querySelector('.bh-cd');
-    const requestLimit = countValue(getAIConfig().aiDailyLimit);
     try {
       while (!state.stopFlag) {
         if (anyRisk(checkRisk())) {
@@ -6356,8 +6410,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         }
         if (!state.paused) {
           if (aiInputChanged(isCurrentInput)) return 'input-changed';
-          if (aiCacheFingerprint() !== fingerprint || countValue(getAIConfig().aiDailyLimit) !== requestLimit
-              || Date.now() >= retryAt) return true;
+          if (aiCacheFingerprint() !== fingerprint || Date.now() >= retryAt) return true;
           const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
           if (card?.isConnected) tagCard(card, 'ai-retry', `全部 AI 接口调用失败，${seconds} 秒后重试；尚未判断该职位`);
           if (countdown) { countdown.style.display = 'block'; countdown.textContent = `🤖 ${seconds}s 后重试全部 AI 接口`; }
@@ -6388,6 +6441,13 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
 
       const requestedPolicy = aiCacheFingerprint();
       const ai = await aiScreen(job, { isCurrentInput: options.isCurrentInput });
+      if (ai.storageFailure) {
+        const reason = ai.err || 'AI 调用记录无法保存，请刷新页面并检查扩展存储';
+        if (card?.isConnected) tagCard(card, 'not-sent', reason);
+        addLog('本地存储异常，已停止本轮；接口尚未判定失败：' + reason, 'err');
+        stop(reason);
+        return { action: 'stop', storageFailure: true, reason, err: reason };
+      }
       // 用户暂停时请求可能仍返回；保留结论和岗位，恢复后再校验规则并消费结果。
       while (state.paused && !state.stopFlag) await sleep(300);
       if (state.stopFlag) return { action: 'stop' };
@@ -6440,7 +6500,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         }
       }
 
-      addLog(`⏳ ${ai.quotaExceeded ? 'AI 请求额度不可用' : '全部 AI 接口不可用'}（${ai.err}），保留当前岗位，一分钟后重试全部接口：${job.title || ''}`, 'err');
+      addLog(`⏳ 全部 AI 接口不可用（${ai.err}），保留当前岗位，一分钟后重试全部接口：${job.title || ''}`, 'err');
       const retryAt = ai.retryAt || Date.now() + 60000;
       const retryState = await waitForAIRetry(card, job, aiCacheFingerprint(cfg), retryAt, options.isCurrentInput);
       if (retryState === 'input-changed') return retryInput();
@@ -7386,11 +7446,35 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     let lastSnapshot = null;
     let pendingNavigation = null;
     let backInFlight = false; // 防止 back/forward 重复触发
+    let detailDirty = true, confirmAfter = 0, refreshAfter = 0;
+    const helperUI = '#boss-helper-panel, #boss-helper-load-error, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm, #bh-model-picker, .bh-tag';
+    const markDetailDirty = (records) => {
+      if (detailDirty) return;
+      detailDirty = records.some((record) => {
+        const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+        if (target?.closest(helperUI)) return false;
+        if (record.type !== 'childList') return true;
+        return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
+          ? !node.matches(helperUI) : node.nodeType === 3 && !!node.textContent.trim());
+      });
+    };
+    const detailObserver = new MutationObserver(markDetailDirty);
+    detailObserver.observe(document.documentElement, { subtree: true, childList: true, characterData: true,
+      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'aria-selected', 'href', 'data-jobid', 'data-job-id', 'title', 'aria-label'] });
+    window.addEventListener('resize', () => { detailDirty = true; });
+    document.addEventListener('visibilitychange', () => { detailDirty = true; });
     const onChange = () => {
+      markDetailDirty(detailObserver.takeRecords());
       for (const context of activeContactContexts) contactContextCurrent(context);
       if (location.href === lastHref) {
-        if (!state._jobProcessing && !state._detailProcessing && (isListPage() || isDetailPage())) {
+        if (!state._jobProcessing && !state._detailProcessing && (isListPage() || isDetailPage())
+            && (detailDirty || confirmAfter && Date.now() >= confirmAfter || Date.now() >= refreshAfter)) {
+          detailDirty = false;
           const current = extractJobSnapshot();
+          confirmAfter = current.ok && !current.bodyConfirmed && !current.bodyPending ? Date.now() + 600 : 0;
+          // CSS-only visibility changes need a fallback, but an unchanged idle
+          // page must not run a full extraction twice every second.
+          refreshAfter = Date.now() + 15000;
           // 标题/ID 可以先于正文更新；保留上一岗位，直到正文也发生变化。
           if (current.ok && (!lastSnapshot || matchSnapshotIdentity(current, lastSnapshot).ok
             || current.description !== lastSnapshot.description)) lastSnapshot = current;
@@ -7404,6 +7488,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       state._detailNavigation = isDetailPage() ? { href: lastHref, fromHref: oldHref, previous } : null;
       pendingNavigation = null;
       lastSnapshot = null;
+      detailDirty = true; confirmAfter = 0; refreshAfter = 0;
       log('url changed →', location.href);
       if (native && panel) panel.hidden = !isDetailPage() && !isListPage() && !state.running;
       if (native && (!state.running || state.stopFlag)) return;

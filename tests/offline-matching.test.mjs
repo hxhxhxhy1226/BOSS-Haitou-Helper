@@ -66,6 +66,140 @@ test('offline C, C++, C# and unrelated English substrings remain distinct', asyn
   assert.equal(f.match('负责 Cortex M4 软件开发', f.config({ mustHave: ['ARM'] })).matched, true);
 });
 
+test('offline associates flight firmware with MCU only when realtime and hardware duties are evidenced', async (t) => {
+  const f = await fixture(t);
+  const firmware = [
+    '飞控软件工程师',
+    '负责飞行控制器底层固件开发与实时任务调度，实现线程同步、信号量及消息队列。',
+    '负责IMU传感器SPI驱动与数据采集，调试PWM电机输出和舵机执行器。',
+  ].join('\n');
+  const matched = f.match(firmware, f.config({ mustHave: ['MCU', '嵌入式', 'RTOS'], mustHaveMin: 3 }));
+  assert.equal(matched.matched, true, matched.reason);
+  assert.equal(matched.details.mustHaveHit, 3);
+  assert.ok(matched.details.mustHaveHits.includes('飞控实时控制固件'), 'diagnostics retain the actual association');
+  for (const keyword of ['STM32', 'FreeRTOS']) {
+    assert.equal(f.match(firmware, f.config({ mustHave: [keyword] })).matched, false,
+      'flight duties do not establish the specific platform ' + keyword);
+  }
+  const bareMetal = firmware.replace('实时任务调度，实现线程同步、信号量及消息队列', '实时控制程序');
+  assert.equal(f.match(bareMetal, f.config({ mustHave: ['MCU'] })).matched, true);
+  assert.equal(f.match(bareMetal, f.config({ mustHave: ['RTOS'] })).matched, false,
+    'realtime bare-metal control does not establish an RTOS');
+  for (const jd of [
+    '飞控软件工程师，研发飞行控制器。',
+    '飞控软件工程师，负责Linux内核和PCIe驱动开发，必须独立承担Linux内核移植。',
+    firmware + '\n本岗位必须独立完成高级导航算法、控制律设计和状态估计。',
+    '公司主营飞控底层固件开发、实时系统、传感器驱动和PWM电机控制。本岗位负责React网页开发。',
+    '飞控工程师，负责固件开发与实时系统测试，负责传感器驱动，没有电机或舵机研发职责。',
+    firmware.replace('飞控软件工程师', '服务器软件工程师').replace('飞行控制器', '计算服务'),
+  ]) assert.equal(f.match(jd, f.config({ mustHave: ['MCU'] })).matched, false, jd);
+  assert.equal(f.match('负责 Cortex-M7 控制器固件开发', f.config({ mustHave: ['MCU'] })).matched, true);
+  assert.equal(f.match('负责 Cortex-A72 Linux软件开发', f.config({ mustHave: ['MCU'] })).matched, false);
+});
+
+const FLIGHT_FIRMWARE_REGRESSION_JD = [
+  '飞控软件工程师',
+  '负责飞行控制器底层固件开发与实时任务调度，实现线程同步、信号量及消息队列。',
+  '负责IMU传感器SPI驱动与数据采集，调试PWM电机输出和舵机执行器。',
+].join('\n');
+
+test('offline flight inference rejects mandatory Linux and algorithm work in either order or across lines', async (t) => {
+  const f = await fixture(t);
+  const cfg = f.config({ mustHave: ['MCU'] });
+  const requirements = [
+    '本岗位必须独立完成Linux内核与PCIe驱动开发。',
+    'Linux内核和PCIe驱动开发为必须独立承担的核心职责。',
+    '导航算法、控制律设计和状态估计为核心工作，入职必须独立承担。',
+    '核心职责：\nLinux内核和PCIe驱动开发。',
+    'Linux内核和PCIe驱动开发：\n入职必须独立承担。',
+    '任职要求：\n必须独立掌握\nLinux内核、PCIe驱动和导航算法。',
+    'Linux内核经验不是必备，但必须独立完成导航算法和状态估计研发。',
+    '必须掌握实时固件或Linux内核至少一种，但所有人必须独立承担PCIe开发。',
+    '公司福利提供导师培训，但本岗位必须独立承担Linux内核和PCIe驱动开发。',
+    'Linux内核必须独立掌握且不要求导航算法经验。',
+    '必须独立承担Linux内核开发且导航算法仅为加分项。',
+    '必须独立承担Linux内核开发，并且不要求导航算法经验。',
+  ];
+  assert.deepEqual(requirements.map((requirement) => ({ requirement,
+    matched: f.match(FLIGHT_FIRMWARE_REGRESSION_JD + '\n' + requirement, cfg).matched })),
+  requirements.map((requirement) => ({ requirement, matched: false })));
+  assert.equal(f.match('飞控控制算法工程师，核心职责为导航算法、控制律设计、状态估计与SLAM研发。', cfg).matched, false);
+});
+
+test('offline flight inference retains firmware work when Linux or algorithms are explicitly optional or negated', async (t) => {
+  const f = await fixture(t);
+  const cfg = f.config({ mustHave: ['MCU', 'RTOS'], mustHaveMin: 2 });
+  const qualifications = [
+    '不要求独立承担Linux内核或导航算法。',
+    'Linux内核、PCIe驱动或高级导航算法经验仅为加分项，并非必备。',
+    '任职要求：\n不要求独立承担Linux内核和PCIe驱动。',
+    '可选加分项：\n精通Linux内核或导航算法者优先，岗位不强制此类经验。',
+    '主要负责实时固件开发，导航算法为选学方向。',
+    '任职要求：\n必须掌握实时固件或Linux内核至少一种，可选择固件方向。',
+    '任职要求：\n必须掌握实时固件或Linux内核，任选其一即可。',
+    '不要求独立承担Linux内核且导航算法仅为加分项。',
+  ];
+  assert.deepEqual(qualifications.map((qualification) => ({ qualification,
+    matched: f.match(FLIGHT_FIRMWARE_REGRESSION_JD + '\n' + qualification, cfg).matched })),
+  qualifications.map((qualification) => ({ qualification, matched: true })));
+});
+
+test('offline flight inference uses the current role instead of duties under company introduction headings', async (t) => {
+  const f = await fixture(t);
+  const cfg = f.config({ mustHave: ['MCU'] });
+  const borrowed = [
+    '公司产品\n' + FLIGHT_FIRMWARE_REGRESSION_JD + '\n本岗位负责React网站开发。',
+    '公司介绍：\n' + FLIGHT_FIRMWARE_REGRESSION_JD + '\n岗位职责：\n负责React网站开发。',
+    '公司业务包括：\n' + FLIGHT_FIRMWARE_REGRESSION_JD + '\n工作内容：\n负责React网站开发。',
+    '飞控软件工程师\n岗位职责：\n负责React网站开发。\n任职要求：\n'
+      + FLIGHT_FIRMWARE_REGRESSION_JD,
+  ];
+  assert.deepEqual(borrowed.map((jd) => ({ jd, matched: f.match(jd, cfg).matched })),
+    borrowed.map((jd) => ({ jd, matched: false })));
+  const currentFirmware = '公司介绍：\n公司还有Linux平台团队，核心业务包含Linux内核和PCIe驱动开发。\n岗位职责：\n'
+    + FLIGHT_FIRMWARE_REGRESSION_JD;
+  assert.equal(f.match(currentFirmware, cfg).matched, true, 'other teams cannot impose this role\'s mandatory core');
+});
+
+test('offline flight inference does not treat explicitly excluded sensor or actuator work as positive evidence', async (t) => {
+  const f = await fixture(t);
+  const cfg = f.config({ mustHave: ['MCU'] });
+  const denied = [
+    FLIGHT_FIRMWARE_REGRESSION_JD.replace('调试PWM电机输出和舵机执行器', '不做PWM电机输出和舵机执行器开发'),
+    FLIGHT_FIRMWARE_REGRESSION_JD.replace('调试PWM电机输出和舵机执行器', '无需调试PWM电机输出和舵机执行器'),
+    FLIGHT_FIRMWARE_REGRESSION_JD.replace('调试PWM电机输出和舵机执行器', '不要求开发电机PWM或舵机执行器控制'),
+    FLIGHT_FIRMWARE_REGRESSION_JD.replace('负责IMU传感器SPI驱动与数据采集', '不做IMU传感器SPI驱动或数据采集'),
+  ];
+  assert.deepEqual(denied.map((jd) => ({ jd, matched: f.match(jd, cfg).matched })),
+    denied.map((jd) => ({ jd, matched: false })));
+  const affirmative = FLIGHT_FIRMWARE_REGRESSION_JD.replace('调试PWM电机输出和舵机执行器',
+    '不做舵机执行器开发，但负责PWM电机输出调试');
+  assert.equal(f.match(affirmative, cfg).matched, true, 'a separate affirmative duty remains actual work');
+  for (const actual of [
+    '负责PWM电机输出调试且不要求舵机经验',
+    '不做舵机执行器开发而负责PWM电机输出调试',
+    '负责PWM电机输出调试并不要求舵机经验',
+  ]) {
+    const jd = FLIGHT_FIRMWARE_REGRESSION_JD.replace('调试PWM电机输出和舵机执行器', actual);
+    assert.equal(f.match(jd, cfg).matched, true, actual);
+  }
+});
+
+test('offline actual STM32/FreeRTOS flight and ECU work retain explicit aliases and OR platform choices', async (t) => {
+  const f = await fixture(t);
+  const platforms = f.config({ mustHave: ['MCU', 'STM32', 'RTOS', 'FreeRTOS'], mustHaveMin: 4 });
+  for (const jd of [
+    '飞控嵌入式工程师，负责STM32传感器驱动和FreeRTOS飞控固件开发。',
+    '汽车ECU软件工程师，负责STM32外设驱动、FreeRTOS任务和CAN通信开发。',
+  ]) assert.equal(f.match(jd, platforms).matched, true, jd);
+  assert.equal(f.match(FLIGHT_FIRMWARE_REGRESSION_JD,
+    f.config({ mustHave: ['MCU|ECU', 'RTOS|Linux'], mustHaveMin: 2 })).matched, true);
+  assert.equal(f.match('飞控Linux工程师，必须独立承担Linux内核和PCIe驱动开发，没有可选固件分支。',
+    f.config({ mustHave: ['MCU'] })).matched, false);
+  assert.equal(f.match('Linux内核和PCIe驱动研发', f.config({ mustHave: ['Linux'] })).matched, true,
+    'the flight association does not impose new hard limits on manually selected literal platforms');
+});
+
 test('offline accepts mixed MCU/RTOS and embedded Linux campus work when technical slots meet the threshold', async (t) => {
   const f = await fixture(t);
   const jd = [

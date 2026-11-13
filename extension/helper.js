@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.8 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.9 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -331,7 +331,7 @@
     state._processedJobs.add(key);
     card.dataset.bhProcessed = '1'; card.dataset.bhProcessedKey = key;
     const tag = card.querySelector('.bh-tag');
-    const kind = ['pass', 'matched', 'skip', 'info', 'ai-skip', 'not-sent', 'pending']
+    const kind = ['pass', 'matched', 'skip', 'info', 'ai-skip', 'not-sent']
       .find((name) => tag?.classList.contains('bh-tag-' + name));
     if (kind) {
       if (!state._jobOutcomes) state._jobOutcomes = new Map();
@@ -692,11 +692,17 @@
     return { experience, education };
   }
 
-  function readJobCard(card) {
-    const fields = {
+  function readJobCardIdentity(card) {
+    return {
       ...scopeJobIdentity(card, true),
       title: fieldText(card, SEL.jobTitle, true),
       company: fieldText(card, SEL.companyName, true),
+    };
+  }
+
+  function readJobCard(card) {
+    const fields = {
+      ...readJobCardIdentity(card),
       location: fieldText(card, ['.job-area', '.job-location', '.job-area-wrapper', '.city-name'], true),
       ...readSalaryField(card, true),
       ...readRequirementFields(card, true),
@@ -744,7 +750,7 @@
     return { ok: false, strength: 0, reason: '详情身份尚未确认' };
   }
 
-  function selectedCardIdentity() {
+  function selectedCardIdentity(identityOnly = false) {
     // Selected styling may live several levels inside a card. Read the complete
     // outer card so its company, ID and footer do not disappear from the identity.
     const innerSelected = '.card-area.active, .card-area.selected, .card-area[aria-selected="true"], '
@@ -753,7 +759,7 @@
       + '.job-name.active, .job-name.selected, .job-name[aria-selected="true"]';
     const cards = collectJobCards().filter((card) => isReadableElement(card)
       && (card.matches('.active, .selected, [aria-selected="true"]') || card.querySelector(innerSelected)));
-    return cards.length === 1 ? readJobCard(cards[0]) : null;
+    return cards.length === 1 ? (identityOnly ? readJobCardIdentity(cards[0]) : readJobCard(cards[0])) : null;
   }
 
   // 页头/选中态可能早于正文更新。保留正文最后观察到的所属岗位，不能用新 ID
@@ -872,8 +878,8 @@
     });
   }
 
-  function extractJobSnapshot(expected) {
-    const selected = selectedCardIdentity();
+  function extractJobSnapshot(expected, { identityOnly = false } = {}) {
+    const selected = selectedCardIdentity(identityOnly);
     const pageJobId = isDetailPage() ? publicJobId(location.href) : '';
     const target = expected || (isDetailPage() ? { jobId: pageJobId } : selected);
     const roots = discoverDetailRoots();
@@ -899,7 +905,7 @@
         const unique = headers.filter((node) => !headers.some((other) => other !== node && other.contains(node)));
         if (unique.length === 1) headerRoot = unique[0];
       }
-      const body = extractDescription(root);
+      const body = identityOnly ? { nodes: [], text: '', source: '' } : extractDescription(root);
       const title = fieldText(headerRoot, DETAIL_TITLE_SELECTORS);
       const company = fieldText(root, DETAIL_COMPANY_SELECTORS) || fieldText(headerRoot, DETAIL_COMPANY_SELECTORS);
       // 页头与正文必须属于同一职位；子范围也继承其详情父范围的冲突，不能绕过坏父节点。
@@ -916,20 +922,20 @@
         : pageJobId && domJobId && pageJobId !== domJobId ? '详情职位 ID 与当前网址不一致'
         : '';
       const fallbackJobId = !identityConflict && !domJobId ? pageJobId : '';
-      const salaryField = readSalaryField(headerRoot);
-      const requirements = readRequirementFields(headerRoot);
-      const locationText = fieldText(headerRoot, ['.job-area', '.job-location', '.text-city', '.city-name'])
+      const salaryField = identityOnly ? {} : readSalaryField(headerRoot);
+      const requirements = identityOnly ? {} : readRequirementFields(headerRoot);
+      const locationText = identityOnly ? '' : fieldText(headerRoot, ['.job-area', '.job-location', '.text-city', '.city-name'])
         || [...headerRoot.querySelectorAll('.job-require > span')].map((el) => readScopedText(el).trim())
           .find((text) => /^[\u4e00-\u9fa5]{2,12}(?:[·区县市][\u4e00-\u9fa5]+)?$/.test(text)
             && !/经验|学历|本科|大专|硕士|博士|应届|不限/.test(text)) || '';
-      let hrRoot = visibleField(root, DETAIL_HR_SEL.split(',').map((s) => s.trim()));
-      if (!hrRoot && isDetailPage()) {
+      let hrRoot = identityOnly ? null : visibleField(root, DETAIL_HR_SEL.split(',').map((s) => s.trim()));
+      if (!identityOnly && !hrRoot && isDetailPage()) {
         const hrNodes = [...document.querySelectorAll(DETAIL_HR_SEL)].filter(detailElementAllowed);
         const unique = hrNodes.filter((node) => !hrNodes.some((other) => other !== node && other.contains(node)));
         if (unique.length === 1) hrRoot = unique[0];
       }
-      const activeText = collectActiveText(hrRoot || root) || collectActiveText(headerRoot);
-      const tags = collectText(['.job-tags', '.job-labels', '.job-sec .tag-list', '.job-detail-header .tag-list'], root);
+      const activeText = identityOnly ? '' : collectActiveText(hrRoot || root) || collectActiveText(headerRoot);
+      const tags = identityOnly ? '' : collectText(['.job-tags', '.job-labels', '.job-sec .tag-list', '.job-detail-header .tag-list'], root);
       const snapshot = {
         root, headerRoot, hrRoot, bodyNodes: body.nodes,
         jobId: domJobId || fallbackJobId,
@@ -938,25 +944,41 @@
         title, company, location: locationText, ...salaryField, ...requirements,
         description: body.text, tags, activeText, source: body.source,
         selectedJobId: selected?.jobId || '', selectedDataJobId: selected?.dataJobId || '',
+        selectedIdentity: selected,
       };
       const identity = identityConflict ? { ok: false, strength: 0, reason: identityConflict }
         : matchSnapshotIdentity(snapshot, target);
       snapshot.identityStrength = identity.strength;
-      snapshot.ok = identity.ok && !!title && !!body.text;
-      snapshot.reason = !identity.ok ? identity.reason : !title ? '未读取到详情标题' : !body.text ? '未读取到职位正文' : '';
-      snapshot.fingerprint = stableAIHash(JSON.stringify([snapshot.jobId, snapshot.jobIdSource, snapshot.dataJobId, title, company, snapshot.salary,
-        snapshot.experience, snapshot.education, locationText, body.text, tags, parseActiveDays(activeText)]));
+      snapshot.ok = identity.ok && !!title && (identityOnly || !!body.text);
+      snapshot.reason = !identity.ok ? identity.reason : !title ? '未读取到详情标题' : !identityOnly && !body.text ? '未读取到职位正文' : '';
+      if (identityOnly) snapshot.ambiguous = !!identityConflict;
+      snapshot.fingerprint = identityOnly
+        ? stableAIHash(JSON.stringify([snapshot.jobId, snapshot.dataJobId, title, company]))
+        : stableAIHash(JSON.stringify([snapshot.jobId, snapshot.jobIdSource, snapshot.dataJobId, title, company, snapshot.salary,
+          snapshot.experience, snapshot.education, locationText, body.text, tags, parseActiveDays(activeText)]));
       candidates.push(snapshot);
     }
     const matches = candidates.filter((item) => item.ok).sort((a, b) => b.identityStrength - a.identityStrength
-      || (a.root.contains(b.root) ? -1 : b.root.contains(a.root) ? 1 : b.description.length - a.description.length));
+      || (a.root.contains(b.root) ? -1 : b.root.contains(a.root) ? 1 : identityOnly ? 0 : b.description.length - a.description.length));
     if (matches.length) {
       const best = matches[0];
-      const ambiguous = matches.some((item) => item !== best && item.identityStrength === best.identityStrength
-        && !best.root.contains(item.root) && !item.root.contains(best.root) && item.fingerprint !== best.fingerprint);
-      return observeJobBody(ambiguous ? { ...best, ok: false, reason: '多个可见详情无法唯一对应目标岗位' } : best);
+      const ambiguous = matches.some((item) => {
+        if (item === best || item.identityStrength !== best.identityStrength
+          || best.root.contains(item.root) || item.root.contains(best.root)) return false;
+        if (!identityOnly) return item.fingerprint !== best.fingerprint;
+        const relation = matchSnapshotIdentity(item, best);
+        // A retained shell can omit a public link while sharing the verified
+        // internal ID. Missing fields do not turn that same-job mirror into a conflict.
+        return !!relation.conflict || !(relation.strength >= 3
+          || item.identityStrength >= 3 && best.identityStrength >= 3);
+      });
+      const result = ambiguous ? { ...best, ok: false, ...(identityOnly ? { ambiguous: true } : {}),
+        reason: '多个可见详情无法唯一对应目标岗位' } : best;
+      return identityOnly ? result : observeJobBody(result);
     }
-    return observeJobBody(candidates[0] ? { ...candidates[0], ok: false } : { ok: false, reason: '未找到可信的当前职位详情范围', root: null, description: '' });
+    const result = candidates[0] ? { ...candidates[0], ok: false } : { ok: false,
+      reason: '未找到可信的当前职位详情范围', root: null, description: '', selectedIdentity: selected };
+    return identityOnly ? result : observeJobBody(result);
   }
 
   function getDetailRoot() {
@@ -1805,9 +1827,9 @@
       stm32: ['stm32开发', 'stm32单片机', 'stm32cubemx'],
       esp32: ['esp32开发'],
       arm: ['arm开发', 'arm平台', 'arm架构', 'cortex-m', 'cortex-r', 'cortex-a'],
-      mcu: ['单片机', '微控制器', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny'],
-      单片机: ['mcu', '微控制器', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny'],
-      微控制器: ['mcu', '单片机', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny'],
+      mcu: ['单片机', '微控制器', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny', 'cortex-m'],
+      单片机: ['mcu', '微控制器', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny', 'cortex-m'],
+      微控制器: ['mcu', '单片机', 'stm32', 'stm8', 'esp32', 'gd32', 'ch32', 'msp430', 'nrf52', 'nrf53', 'rp2040', 'atmega', 'attiny', 'cortex-m'],
       嵌入式: ['嵌入式软件', '嵌入式开发', '嵌入式硬件', '嵌入式系统', '嵌入式图形库'],
       rtos: ['freertos', 'rt-thread', 'rtt', '实时操作系统'],
       freertos: ['free rtos'],
@@ -1880,8 +1902,89 @@
     return new RegExp(left + escapeRegExp(kwNorm) + right, 'i').test(textNorm);
   }
 
+  function flightControlKeywordHit(text, keyword) {
+    const key = normalizeForMatch(keyword);
+    if (!['mcu', '单片机', '微控制器', '嵌入式', 'rtos'].includes(key)) return '';
+    const source = String(text || '').normalize('NFKC');
+    const flight = /飞控|飞行控制(?:器|系统)/;
+    if (!flight.test(source)) return '';
+
+    // 标题作用域跨行保留；公司介绍、标签和加分项不能借给当前岗位当职责。
+    const externalHeading = /^(?:(?:公司|企业)(?:介绍|简介|概况|业务|主营|产品|福利)|(?:业务|产品)(?:介绍|简介)|关于我们|福利(?:待遇)?|员工福利|培训(?:福利|安排)|(?:岗位|职位)?标签|(?:可选)?加分(?:项|技能)|优先条件)/;
+    const dutyHeading = /^(?:(?:本|该|当前)(?:岗位|职位)|(?:岗位|职位|工作|招聘)?(?:核心)?(?:职责|内容|任务))/;
+    const requirementHeading = /^(?:任职(?:要求|资格|条件)|(?:岗位|职位|技能|技术|招聘)(?:要求|资格|条件)|必备(?:要求|技能|能力)|核心(?:要求|技能)|必须(?:独立)?(?:掌握|承担|完成|负责))/;
+    const coreHeading = /^(?:核心(?:职责|工作|任务|要求|技能)|必备(?:要求|技能|能力)|必须(?:独立)?(?:掌握|承担|完成|负责))/;
+    const records = [];
+    let section = 'duties', core = false, pending = '';
+    const flush = () => {
+      if (pending.trim()) records.push({ text: pending.trim(), section, core });
+      pending = '';
+    };
+    const parts = source.split(/([\r\n。；;！？!?]+)/);
+    for (let i = 0; i < parts.length; i += 2) {
+      let clause = parts[i].trim().replace(/^(?:[-*•●]\s*|(?:\d+|[一二三四五六七八九十]+)[.)、]\s*)/, '');
+      const separator = parts[i + 1] || '';
+      if (!clause) continue;
+      // 同句“公司福利……但本岗位……”仍须保留本岗位的明确要求。
+      const currentAt = clause.search(/(?:本|该|当前)(?:岗位|职位)/);
+      if (currentAt > 0 && externalHeading.test(clause)) clause = clause.slice(currentAt);
+      if (externalHeading.test(clause)) {
+        flush(); section = 'external'; core = false;
+        continue;
+      }
+      if (requirementHeading.test(clause) || dutyHeading.test(clause)) {
+        flush();
+        section = requirementHeading.test(clause) ? 'requirements' : 'duties';
+        core = coreHeading.test(clause);
+      }
+      if (section === 'external') continue;
+      pending += (pending ? ' ' : '') + clause;
+      // 换行可能只是排版折行；句号等实际句界才终止当前条件。
+      if (/[。；;！？!?]/.test(separator)) flush();
+    }
+    flush();
+    if (!records.some((record) => flight.test(record.text))) return '';
+
+    const atoms = (clause) => clause.split(/[，,]+|但(?:是)?|不过|然而|并且|且|而|并(?=不(?:需要|要求|承担|负责|涉及|做|开发|使用|必)|非)/)
+      .map((part) => part.trim()).filter(Boolean);
+    const optional = /加分|优先|选学|选修|非必备|并非必备|非强制|不是(?:必备|强制|核心)|不强制|可选(?:项|技能|方向)/;
+    const negated = (part, hit) => {
+      const before = part.slice(0, hit.index);
+      const after = part.slice(hit.index + hit[0].length);
+      return /(?:不(?:负责|承担|涉及|需要|要求|做|开发|使用|必|是|属于|作为)|并非|无需|无须|没有|未(?:负责|承担|涉及|做|开发))[^，,。；;\n]*$/.test(before)
+        || /(?:不(?:是|属于|作为|需要|要求|承担|负责)|并非)(?:[^，,。；;\n]*)/.test(after);
+    };
+    const positiveIn = (part, pattern) => [...part.matchAll(new RegExp(pattern.source, pattern.flags.replace(/g/g, '') + 'g'))]
+      .some((hit) => !negated(part, hit));
+    const evidenced = (clause, pattern) => atoms(clause).some((part) => !optional.test(part) && positiveIn(part, pattern));
+    // 任职要求中的开发经验不是当前工作；关联需要完整的实际固件职责组合。
+    const duties = records.filter((record) => record.section === 'duties'
+      && /负责|参与|开发|实现|编写|调试|设计|维护|移植/.test(record.text)
+      && !/培训|讲师|授课|招生/.test(record.text)).map((record) => record.text);
+    if (!duties.some((clause) => evidenced(clause, /固件|板级软件|底层软件/))
+        || !duties.some((clause) => evidenced(clause, /实时(?:系统|任务|调度|控制)|任务调度/))
+        || !duties.some((clause) => evidenced(clause, /传感器|\bIMU\b|陀螺仪|加速度计/i) && evidenced(clause, /驱动|接口|采集|接入/))
+        || !duties.some((clause) => evidenced(clause, /\bPWM\b|电机|舵机|执行器|数据链|\bRTK\b/i))) return '';
+
+    // 核心要求按完整条件双向识别，任选条件只豁免其匹配分支。
+    const strong = /核心|主要|必须|必备|独立|深入|精通/;
+    const specialist = /Linux\s*内核|PCIe|导航算法|飞控算法|控制律|状态估计|SLAM/i;
+    const choice = /至少(?:一|1)(?:种|项)|任选(?:其一|一种|一项)|任意(?:一|1)(?:种|项)|任一(?:即可|平台)/;
+    for (const record of records) {
+      if (!record.core && !strong.test(record.text)) continue;
+      for (const part of atoms(record.text)) {
+        if (optional.test(part)) continue;
+        if (/或/.test(part) && /固件|实时控制|RTOS|MCU|单片机/i.test(part) && choice.test(record.text)) continue;
+        if (positiveIn(part, specialist)) return '';
+      }
+    }
+    if (key === 'rtos' && !duties.some((clause) => evidenced(clause, /实时操作系统|任务调度/)
+        && evidenced(clause, /线程|信号量|消息队列|任务间通信/))) return '';
+    return key === 'rtos' ? '飞控实时任务调度' : '飞控实时控制固件';
+  }
+
   function positiveKeywordHit(text, keyword) {
-    return expandKeywordAlts(keyword).find((alias) => includesKeyword(text, alias)) || '';
+    return expandKeywordAlts(keyword).find((alias) => includesKeyword(text, alias)) || flightControlKeywordHit(text, keyword);
   }
 
   function hasAny(text, kws) {
@@ -2341,16 +2444,19 @@
     if (!next) return false;
     const expected = readJobCard(next);
     addLog('→ 当前卡片处理结束，切换下一张：' + expected.title);
+    tagCard(next, 'reading', '正在切换并确认当前职位正文');
     const snapshot = await selectJobCard(next, { expected, stillAllowed: allowed });
     if (snapshot.ok && allowed()) {
       state._preparedJobSelection = { ...snapshot, cardKey: jobCardKey(next) };
       addLog('已切换并确认下一张：' + snapshot.title);
       return true;
     }
-    if (!snapshot.stopped && !snapshot.cancelled && allowed() && next.isConnected) {
-      tagCard(next, 'pending', '切换下一张尚未确认：' + snapshot.reason);
+    if (!snapshot.stopped && !snapshot.cancelled && allowed() && next.isConnected && cardStillMatches(next, expected)) {
+      tagCard(next, 'reading', '切换下一张未完成，将重新读取：' + snapshot.reason);
       next.querySelector('.bh-tag').dataset.bhRetryable = '1';
       addLog('下一张尚未就绪，将重新确认：' + snapshot.reason, 'info');
+    } else if (state.stopFlag && next.isConnected && cardStillMatches(next, expected)) {
+      tagCard(next, 'not-sent', '已停止，尚未读取并判断该职位');
     }
     return false;
     } finally { state._jobProcessing = false; }
@@ -3364,8 +3470,8 @@
     .bh-tag-info { background: rgba(142,142,147,0.85); color: #fff; }
     .bh-tag-ai-pass { background: rgba(124,58,237,0.94); color: #fff; }
     .bh-tag-ai-skip { background: rgba(255,59,48,0.94); color: #fff; }
-    .bh-tag-not-sent { background: rgba(100,116,139,0.94); color: #fff; }
-    .bh-tag-pending { background: rgba(217,119,6,0.94); color: #fff; }
+    .bh-tag-not-sent { background: rgba(255,59,48,0.94); color: #fff; }
+    .bh-tag-reading, .bh-tag-ai-retry, .bh-tag-judging, .bh-tag-sending { background: rgba(217,119,6,0.94); color: #fff; }
     .bh-tag-matched { background: rgba(52,199,89,0.92); color: #fff; }
     .bh-tag-reason {
       display: block; font-weight: 400; font-size: 9px;
@@ -3383,14 +3489,18 @@
     if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
     const t = document.createElement('div');
     t.className = 'bh-tag bh-tag-' + kind;
+    t.dataset.bhJobKey = jobCardKey(card);
     const kText = {
-      pass: '✅ 完成',
-      skip: '❌ 跳过',
+      pass: '✅ 成功',
+      skip: '❌ 失败',
       info: '⏭ 已沟通过',
       'ai-pass': '🤖 AI 通过',
-      'ai-skip': '🤖 AI 不匹配',
-      'not-sent': '⏸ 未投递',
-      pending: '⏳ 待确认',
+      'ai-skip': '❌ 失败',
+      'not-sent': '❌ 失败',
+      reading: '⏳ 读取中',
+      'ai-retry': '🤖 AI 重试中',
+      judging: '🤖 判断中',
+      sending: '⏳ 投递中',
       matched: '✓ 筛选通过',
     }[kind] || kind;
     t.title = kText + (reason ? '\n' + reason : '');
@@ -3451,12 +3561,12 @@
       <div class="bh-body">
         <div class="bh-stats">
           <div class="bh-stat"><div class="bh-stat-num" data-stat="processed">0</div><div class="bh-stat-lbl">已处理</div></div>
-          <div class="bh-stat bh-sent" title="今日已发起的沟通占额，含待确认或中断记录，不代表全部送达"><div class="bh-stat-num" data-stat="sent">0</div><div class="bh-stat-lbl">已发起</div></div>
+          <div class="bh-stat bh-sent" title="今日已发起的沟通占额，含无成功回执或中断记录，不代表全部送达"><div class="bh-stat-num" data-stat="sent">0</div><div class="bh-stat-lbl">已发起</div></div>
           <div class="bh-stat bh-skip"><div class="bh-stat-num" data-stat="skipped">0</div><div class="bh-stat-lbl">已跳过</div></div>
           <div class="bh-stat bh-ai"><div class="bh-stat-num" data-stat="aiCalls">0</div><div class="bh-stat-lbl">🤖 AI</div></div>
         </div>
         <div class="bh-progress"><div class="bh-progress-bar"></div></div>
-        <div class="bh-progress-text" title="按已发起次数保守占额；待确认记录请到 BOSS 消息核对">今日已发起 <span data-stat="sent2">0</span> / 上限 <span data-stat="limit">-</span> · 剩余 <span data-stat="remaining">0</span></div>
+        <div class="bh-progress-text" title="按已发起次数保守占额；无成功回执的记录请到 BOSS 消息核对">今日已发起 <span data-stat="sent2">0</span> / 上限 <span data-stat="limit">-</span> · 剩余 <span data-stat="remaining">0</span></div>
         <div class="bh-progress-text" style="font-size:10px;opacity:.7;">本轮 <span data-stat="round">0</span> · 本批 <span data-stat="batch">0/20</span></div>
         <div class="bh-actions">
           <button class="bh-btn bh-btn-primary" data-act="toggle">开始</button>
@@ -4721,6 +4831,8 @@
   const DIRECTION_MATCH_RULES = `【岗位方向判定规则（优先于默认及自定义提示中的泛化方向判断）】
 以画像的已掌握技术、项目和目标为核心依据，同时评估岗位核心技能适配；不要自行增加“只做 MCU”“不投 Linux”等排斥，也不能把所有嵌入式岗位都判成符合画像。
 MCU 与嵌入式 Linux/RTOS 不互斥，但混合岗位可投的依据是当前确有 MCU/RTOS 实际研发职责，或明确可选择 MCU/RTOS 子方向，且该工作与画像能力相符；不能仅因写着“嵌入式”就放行。MCU 仅出现于标签、加分项或公司业务时，不算当前实际职责。ARM/SoC/BSP/UBoot、设备树、根文件系统和设备驱动等词不自动等价于有 MCU 工作。
+飞控/飞行控制器岗位可以属于 MCU/RTOS 嵌入式实时控制研发。即使 JD 没直接写 MCU，当前实际承担的飞控底层固件、实时任务、传感器驱动、数据链/RTK 接口及电机/舵机控制等工作，也可与画像已掌握的单片机、RTOS、传感器或电机控制项目形成技术关联；不得只因缺少 MCU 字样或飞控领域名称不同而拒绝。须引用实际职责与画像证据，只有“飞控”标题、公司业务或兴趣不能证明能力匹配。ARM/ZYNQ 平台、PX4/ArduPilot 框架和 HIL 测试不自动等价于 MCU 能力；FreeRTOS 项目经验也不能自动证明已会 uCOS/VxWorks、ZYNQ 硬件、专业飞控框架或 HIL 必备核心工作，可选平台与允许培养仍按具体 JD 评估。
+飞控固件关联不等于已会所有飞控技术。高级导航算法、控制律设计、状态估计、SLAM 等若为岗位必备核心，须分别核对画像的能力证据；普通单片机或 FOC 电机项目不能自动证明这些专业能力。深 Linux 核心、明确不会的能力和未验证的强制核心要求仍按技术适配规则判断，不能因飞控名称或少量固件职责默认满足。
 Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、UBoot 移植、内核裁剪、设备树、根文件系统、PCIe 驱动等为核心或强制必备，且没有匹配的 MCU/RTOS 工作、可选分支或画像中的核心能力证据，可以按技术适配不足拒绝；无需先有“不投 Linux”的明确排除词，也不得从画像未提 Linux 就断言不会。
 混合岗位中若所有候选人仍必须独立承担深入 Linux/PCIe 等核心任务，少量 MCU 职责不能覆盖明确核心技能缺口，也不能将未验证的强制核心能力默认满足；可选 MCU 分支只有在不强制承担该缺口工作时才构成适配依据。
 校招明确允许选择 MCU/RTOS 分支、提供培养或主要要求可迁移基础能力时，按该具体安排评估；仅并列列出多个技术词、公司业务介绍、福利或其他岗位中的词不算当前可选职责。用户明确写出的“不投 Linux”“只做裸机/MCU”等限定仍优先，混合技术描述不能覆盖明确排斥。
@@ -5625,9 +5737,10 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
   // v1.1.4：重新巡检与本地条件复核修正，清除此前缓存的误拒结论。
   // v1.1.5：允许嵌入式混合技术栈与明确可选校招方向，旧方向拒绝缓存作废。
   // v1.1.8：完整画像与核心技术适配，旧泛化嵌入式放行缓存作废。
+  // v1.1.9：飞控实时固件关联按职责与画像判断，旧领域泛化拒绝/通过缓存作废。
   function aiCacheFingerprint(cfg) {
     cfg = cfg || getAIConfig();
-    return 'v118|' + stableAIHash({
+    return 'v119|' + stableAIHash({
       aiEnabled: cfg.aiEnabled === true,
       skipKeywordCheck: !!state.skipKeywordCheck,
       aiMaxJDChars: Number(cfg.aiMaxJDChars || 2500),
@@ -6027,6 +6140,14 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     } finally {
       state._loopActive = false;
       state.running = false;
+      for (const card of collectJobCards()) {
+        const progress = card.querySelector('.bh-tag-reading, .bh-tag-ai-retry, .bh-tag-judging, .bh-tag-ai-pass, .bh-tag-sending');
+        if (progress) {
+          if (progress.dataset.bhJobKey !== jobCardKey(card)) { progress.remove(); continue; }
+          const reason = progress.querySelector('.bh-tag-reason')?.textContent;
+          tagCard(card, 'not-sent', '本轮已结束，该职位尚未完成处理' + (reason ? '：' + reason : ''));
+        }
+      }
     }
   }
 
@@ -6198,7 +6319,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
           if (aiCacheFingerprint() !== fingerprint || countValue(getAIConfig().aiDailyLimit) !== requestLimit
               || Date.now() >= retryAt) return true;
           const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
-          if (card?.isConnected) tagCard(card, 'pending', `AI 接口不可用，${seconds} 秒后重试全部接口`);
+          if (card?.isConnected) tagCard(card, 'ai-retry', `全部 AI 接口调用失败，${seconds} 秒后重试；尚未判断该职位`);
           if (countdown) { countdown.style.display = 'block'; countdown.textContent = `🤖 ${seconds}s 后重试全部 AI 接口`; }
         } else if (countdown) countdown.style.display = 'none';
         await sleep(300);
@@ -6322,7 +6443,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
 
   function cardStillMatches(card, expected) {
     if (!card?.isConnected) return isDetailPage() && !!expected.jobId && publicJobId(location.href) === expected.jobId;
-    const current = readJobCard(card);
+    const current = readJobCardIdentity(card);
     const identity = matchSnapshotIdentity(current, expected);
     // 同岗位重渲染可改变公开链接/data 属性的表示；已知 ID 仍须有直接或别名匹配。
     return !!current.title && identity.ok && (!(expected.jobId || expected.dataJobId) || identity.strength >= 3);
@@ -6332,7 +6453,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     if (state.stopFlag || state.paused) return false;
     const current = extractJobSnapshot(expected);
     if (!current.ok || current.bodyPending || current.fingerprint !== snapshot.fingerprint) return false;
-    const selected = selectedCardIdentity();
+    const selected = current.selectedIdentity;
     if (selected && expected && matchSnapshotIdentity(selected, expected).conflict) return false;
     if (expectedJob) {
       const liveCard = card?.isConnected ? readJobCard(card) : expected || {};
@@ -6362,6 +6483,13 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
   const CONTACT_CONTROL_SEL = 'button, a, [role="button"], .default-btn';
   const CONTACT_SUCCESS_RE = /已向\s*BOSS\s*发送消息|打招呼成功|消息已发送|沟通成功|招呼已发送|已发送招呼|已成功打招呼/i;
   const CONTACT_FAILURE_RE = /沟通失败|发送失败|(?:今日|每天|每日).{0,20}(?:沟通|打招呼).{0,20}(?:上限|用完)|操作过于频繁|请稍后再试|请先登录|登录失效/;
+  const activeContactContexts = new Set();
+  function contactIdentityMutationRelevant(records) {
+    return records.some((record) => {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      return !target?.closest('#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm');
+    });
+  }
   function contactNoticeSignature(text) {
     const compact = String(text || '').replace(/\s+/g, '');
     const failure = compact.match(CONTACT_FAILURE_RE);
@@ -6424,26 +6552,50 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         for (const el of root.querySelectorAll(selector)) buttons.set(el, (el.textContent || '').trim());
       }
     }
-    return { expected: { ...expected }, identity: snapshot, button, buttons, href: location.href,
+    const context = { expected: { ...expected }, identity: snapshot, button, buttons, href: location.href,
       roots: [...new Set([snapshot.headerRoot, snapshot.root].filter(Boolean))],
-      notices: new Map(contactNoticeElements().map((el) => [el, contactNoticeSignature(contactNoticeText(el))])) };
+      notices: new Map(contactNoticeElements().map((el) => [el, contactNoticeSignature(contactNoticeText(el))])),
+      expiresAt: Date.now() + 60000, invalidated: false };
+    if (!snapshot.ok) return context;
+    // Observe from activation, including time spent writing the click record.
+    // Leaving the job permanently invalidates this receipt even after returning.
+    let expiry = null;
+    const checkIdentity = () => contactContextCurrent(context);
+    const observer = new MutationObserver((records) => {
+      if (contactIdentityMutationRelevant(records)) checkIdentity();
+    });
+    context.dispose = () => {
+      observer.disconnect(); clearTimeout(expiry); activeContactContexts.delete(context);
+      window.removeEventListener('popstate', checkIdentity);
+      window.removeEventListener('hashchange', checkIdentity);
+    };
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'aria-selected',
+        'href', 'data-id', 'data-jobid', 'data-job-id'] });
+    window.addEventListener('popstate', checkIdentity);
+    window.addEventListener('hashchange', checkIdentity);
+    activeContactContexts.add(context);
+    expiry = setTimeout(() => { context.invalidated = true; context.dispose(); }, 60000);
+    return context;
   }
   function contactContextCurrent(context) {
-    if (!context?.identity?.ok) return false;
+    if (!context?.identity?.ok || context.invalidated) return false;
+    const invalidate = () => { context.invalidated = true; context.dispose?.(); return false; };
     const before = new URL(context.href), current = new URL(location.href);
-    if (current.origin !== before.origin || current.pathname !== before.pathname) return false;
+    if (current.origin !== before.origin || current.pathname !== before.pathname) return invalidate();
     const expected = context.identity;
     // 提交前已经验证完整 JD。回执只核对岗位身份，背景被弹窗隐藏或正文刷新不等于换岗。
-    const identities = [selectedCardIdentity(), extractJobSnapshot(context.expected),
+    const currentSnapshot = extractJobSnapshot(context.expected, { identityOnly: true });
+    const identities = [currentSnapshot.selectedIdentity, currentSnapshot,
       ...context.roots.filter((root) => root.isConnected).map((root) => scopeJobIdentity(root, false, true, [expected.jobId]))];
-    return !identities.filter(Boolean).some((identity) => {
+    const conflict = identities.filter(Boolean).some((identity) => {
       // 回执可使字段隐藏/清空；明确冲突仍拦截，缺少字段不等于换岗。
       return !!matchSnapshotIdentity(identity, expected).conflict;
     });
+    return conflict ? invalidate() : true;
   }
   function readOfficialContactResult(context) {
     if (!contactContextCurrent(context)) return null;
-    const snapshot = extractJobSnapshot(context.expected);
     const fresh = contactNoticeElements()
       .map((el) => { const text = contactNoticeText(el); return { el, text, signature: contactNoticeSignature(text), dialog: contactDialogFor(el) }; })
       .filter(({ el, signature, dialog }) => signature && signature !== context.notices.get(el)
@@ -6456,6 +6608,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       return { status: 'confirmed', reason: sent.text, notice: sent.el, dialog, stay: dialog && contactStayButton(dialog) };
     }
     {
+      const snapshot = extractJobSnapshot(context.expected, { identityOnly: true });
       for (const root of new Set([...context.roots, snapshot.headerRoot, snapshot.root].filter((root) => root?.isConnected))) {
         for (const selector of SEL.detailChatBtn) {
           const continued = [...root.querySelectorAll(selector)].find((el) => detailElementAllowed(el)
@@ -6475,7 +6628,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       if (state.stopFlag || state.paused || !contactContextCurrent(context) || Date.now() >= until) break;
       await sleep(200);
     } while (true);
-    return { status: 'unconfirmed', reason: '尚未收到当前职位的官方成功提示，请在 BOSS 消息中核对' };
+    return { status: 'unconfirmed', reason: '未收到当前职位的官方成功回执，请在 BOSS 消息中核对' };
   }
   async function dismissOfficialContactDialog(result, context) {
     // 按钮状态可能先更新，成功框在下一次页面渲染才出现；等待它挂载后再清理。
@@ -6510,10 +6663,13 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         catch (error) { result.closeError = String(error?.message || error); }
       }
       const deadline = Date.now() + 1200;
-      let hiddenSince = 0;
-      while (Date.now() < deadline) {
-        if (visible()) hiddenSince = 0;
-        else if (!hiddenSince) hiddenSince = Date.now();
+      let hiddenSince = null;
+      // A slow DOM read may cross the deadline after the dialog has disappeared.
+      // Finish the hidden stability check already in progress before timing out.
+      while (Date.now() < deadline || hiddenSince !== null) {
+        if (!contactContextCurrent(context)) return false;
+        if (visible()) hiddenSince = null;
+        else if (hiddenSince === null) hiddenSince = Date.now();
         else if (Date.now() - hiddenSince >= 200) return true;
         await sleep(100);
       }
@@ -6521,36 +6677,45 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     return false;
   }
   function watchPendingContactResult(result, title, card) {
-    if (!card || !result.context) return;
+    if (!card || !result.context || !contactContextCurrent(result.context)) { result.context?.dispose?.(); return; }
     state._pendingContactCleanup?.();
     let timer = null, expiry = null, disposed = false;
-    const cleanup = () => {
+    const cleanup = (keepContext = false) => {
       disposed = true; observer.disconnect(); clearTimeout(timer); clearTimeout(expiry);
+      if (!keepContext) result.context.dispose?.();
       if (state._pendingContactCleanup === cleanup) state._pendingContactCleanup = null;
     };
     const check = async () => {
       timer = null;
       if (disposed) return;
+      // Once the detail changes to another job, later dialogs cannot be tied to
+      // this attempt even if the user returns to its original card.
+      if (!contactContextCurrent(result.context)) { cleanup(); return; }
       const expected = result.context.identity;
       const identity = scopeJobIdentity(card, true, true, [expected.jobId]);
-      if (!card.isConnected || !card.querySelector('.bh-tag-pending')
+      if (!card.isConnected || card.querySelector('.bh-tag')?.dataset.bhReceiptMissing !== '1'
         || matchSnapshotIdentity(identity, expected).conflict) { cleanup(); return; }
       const late = readOfficialContactResult(result.context);
       if (!late) return;
-      cleanup();
-      logOfficialContactResult(late, title, card);
-      if (late.status === 'confirmed') {
-        let closed = false;
-        try { closed = await dismissOfficialContactDialog(late, result.context); } catch (_) {}
-        if (!closed) stop('投递已完成，但成功弹窗尚未关闭；关闭弹窗后再继续');
-      } else if (late.status === 'rejected') stop('BOSS 未确认本次沟通：' + late.reason);
+      cleanup(true);
+      late.context = result.context;
+      try {
+        logOfficialContactResult(late, title, card);
+        if (late.status === 'confirmed') {
+          let closed = false;
+          try { closed = await dismissOfficialContactDialog(late, result.context); } catch (_) {}
+          if (!closed) stop('投递已完成，但成功弹窗尚未关闭；关闭弹窗后再继续');
+        } else if (late.status === 'rejected') stop('BOSS 未确认本次沟通：' + late.reason);
+      } finally { result.context.dispose?.(); }
     };
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((records) => {
+      if (!contactIdentityMutationRelevant(records)) return;
+      if (!contactContextCurrent(result.context)) { cleanup(); return; }
       if (!disposed && timer === null) timer = setTimeout(() => { check().catch(() => cleanup()); }, 100);
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true,
       attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'href', 'data-jobid', 'data-job-id'] });
-    expiry = setTimeout(cleanup, 60000);
+    expiry = setTimeout(cleanup, Math.max(0, result.context.expiresAt - Date.now()));
     state._pendingContactCleanup = cleanup;
   }
   async function performOfficialContact(button, expected, guard, reservation) {
@@ -6600,14 +6765,14 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       } catch (error) { cleanupError = String(error?.message || error); }
       refreshStats();
     }
-    if (!activated) return { status: 'not-started', reason: [clickError || (state.stopFlag ? '已停止，尚未点击沟通'
+    if (!activated) return { status: 'not-started', expected: { ...expected }, reason: [clickError || (state.stopFlag ? '已停止，尚未点击沟通'
       : state.paused ? '已暂停，尚未点击沟通' : '岗位、规则或按钮状态已改变，未点击沟通'),
       cleanupError ? '撤销预留失败：' + cleanupError : ''].filter(Boolean).join('；') };
     // 激活一旦被调用，异常或没有回执都不能自动重发；保留占额以防重复联系。
     const result = await resultPromise;
     result.context = context;
     if (result.status === 'unconfirmed' && clickError) {
-      result.reason = '沟通事件派发中断，发送结果待确认；本次额度已保留，请在 BOSS 消息中核对';
+      result.reason = '沟通事件派发中断，未收到官方成功回执；本次额度已保留，请在 BOSS 消息中核对';
     }
     if (cleanupError) addLog('沟通占额已保留，点击记录更新失败：' + cleanupError, 'err');
     if (result.status === 'confirmed') {
@@ -6623,9 +6788,12 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       state._lastRisk = 'BOSS 未确认本次沟通：' + result.reason;
       setStatus('alert');
     }
+    if (result.status !== 'unconfirmed') context.dispose?.();
     return result;
   }
   function logOfficialContactResult(result, title, card) {
+    const expected = result.context?.expected || result.expected;
+    if (card && expected && !cardStillMatches(card, expected)) card = null;
     if (result.status === 'confirmed') {
       if (card?.isConnected) tagCard(card, 'pass', '官方已确认');
       addLog(`✓ ${title} | BOSS 官方已确认沟通（招呼内容使用手机端默认设置）`, 'send');
@@ -6633,8 +6801,11 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       if (card?.isConnected) tagCard(card, 'not-sent', result.reason);
       addLog(`✗ ${title} | ${result.reason}`, 'skip');
     } else {
-      if (card?.isConnected) tagCard(card, result.status === 'rejected' ? 'not-sent' : 'pending', result.status === 'rejected' ? result.reason : '已点击沟通，等待官方确认');
-      addLog(`${result.status === 'rejected' ? '✗' : '⚠'} ${title} | ${result.status === 'rejected' ? '官方提示失败' : '已发起沟通，待确认'}：${result.reason}；为避免重复，本次占额保留`, result.status === 'rejected' ? 'err' : 'info');
+      if (card?.isConnected) {
+        tagCard(card, 'not-sent', result.reason);
+        if (result.status === 'unconfirmed') card.querySelector('.bh-tag').dataset.bhReceiptMissing = '1';
+      }
+      addLog(`✗ ${title} | 投递失败（${result.status === 'rejected' ? '官方拒绝' : '未收到成功回执'}）：${result.reason}；为避免重复，本次占额保留`, 'err');
       if (result.status === 'unconfirmed') watchPendingContactResult(result, title, card);
     }
     refreshStats();
@@ -6655,17 +6826,28 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
 
   async function processOne(card) {
     if (state._jobProcessing || state._detailProcessing) return false;
+    const processingKey = jobCardKey(card);
     state._jobProcessing = true;
     try {
       await processOneInner(card);
       const tag = card.querySelector('.bh-tag');
       if (!tag || tag.dataset.bhRetryable === '1') return false;
       // A label used while reading/waiting is not a completed screening outcome.
-      return ['pass', 'skip', 'ai-skip', 'matched', 'info', 'not-sent', 'pending']
+      return ['pass', 'skip', 'ai-skip', 'matched', 'info', 'not-sent']
         .some((kind) => tag.classList.contains('bh-tag-' + kind));
     }
-    catch (error) { if (card?.isConnected) tagCard(card, 'not-sent', '处理异常：' + (error?.message || error)); throw error; }
-    finally { state._jobProcessing = false; if (card) delete card.dataset.bhProcessing; }
+    catch (error) {
+      if (card?.isConnected && jobCardKey(card) === processingKey) tagCard(card, 'not-sent', '处理异常：' + (error?.message || error));
+      throw error;
+    }
+    finally {
+      if (state.stopFlag && card?.isConnected && jobCardKey(card) === processingKey
+          && card.querySelector('.bh-tag-reading, .bh-tag-ai-retry, .bh-tag-judging, .bh-tag-ai-pass, .bh-tag-sending')) {
+        const reason = card.querySelector('.bh-tag-reason')?.textContent;
+        tagCard(card, 'not-sent', '已停止，未完成本次职位处理' + (reason ? '：' + reason : ''));
+      }
+      state._jobProcessing = false; if (card) delete card.dataset.bhProcessing;
+    }
   }
 
   async function processOneInner(card) {
@@ -6679,8 +6861,13 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
 
     const expected = readJobCard(card);
     let { title, company } = expected;
+    const tagCurrentCard = (kind, reason) => {
+      if (!card?.isConnected || !cardStillMatches(card, expected)) return null;
+      tagCard(card, kind, reason);
+      return card.querySelector('.bh-tag');
+    };
     const notSent = (reason) => {
-      if (card?.isConnected) tagCard(card, 'not-sent', reason);
+      tagCurrentCard('not-sent', reason);
       addLog(`✗ ${title || '(无标题)'} | 未投递：${reason}`, 'skip');
     };
     const jdCard = expected.jdCard;
@@ -6700,13 +6887,14 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       addLog('卡片不可见或已被列表复用，未处理：' + title, 'skip');
       return;
     }
+    tagCurrentCard('reading', '正在确认当前卡片和职位正文');
     addLog(`→ 展开详情：${title} | 公司="${company}" | 职位ID="${expected.jobId || expected.dataJobId}"`);
     const snapshot = await selectJobCard(card, { expected });
     if (!snapshot.ok) {
       if (!snapshot.stopped) {
         if (card.isConnected && cardStillMatches(card, expected)) {
-          tagCard(card, 'pending', '详情尚未就绪，将重试：' + snapshot.reason);
-          card.querySelector('.bh-tag').dataset.bhRetryable = '1';
+          const tag = tagCurrentCard('reading', '详情读取尚未完成，将重试；尚未调用 AI：' + snapshot.reason);
+          if (tag) tag.dataset.bhRetryable = '1';
         }
         addLog(`✗ ${title} | 详情读取未确认：${snapshot.reason}`, 'skip', snapshotDiagnostic(snapshot));
       }
@@ -6746,7 +6934,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       : matchJob(jd, activeText, sal, state.config, vars, job);
 
     if (!result.matched) {
-      tagCard(card, 'skip', result.reason);
+      tagCurrentCard('skip', result.reason);
       // v1.0.17：命中排除词时，日志直接带出「出处」——
       // 打是哪一段文本命中的 + 命中的那一句上下文，不用再点开详情猜。
       // 误判时一眼就能看出"这段文字根本不属于当前职位"还是"JD 里真有这个词"。
@@ -6769,13 +6957,14 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
 
     // ===== AI 语义判断：包括排除词；本地仅先检查活跃度 =====
     if (state.config.aiEnabled) {
+      tagCurrentCard('judging', '正在依据个人画像和当前职位正文判断');
       const gate = await runAIGate(card, job, {
         isCurrentInput: () => cardStillMatches(card, expected) && snapshotStillCurrent(snapshot, expected, job, card),
       });
       if (gate.action === 'stop') { notSent('已停止，未执行沟通'); return; }
       if (gate.action === 'retry') {
-        tagCard(card, 'pending', gate.reason || '当前岗位输入已变化，将重新读取');
-        card.querySelector('.bh-tag').dataset.bhRetryable = '1';
+        const tag = tagCurrentCard('reading', gate.reason || '当前岗位输入已变化，将重新读取');
+        if (tag) tag.dataset.bhRetryable = '1';
         addLog(`⏳ ${title} | 当前岗位输入已变化，将重新读取`, 'info');
         return;
       }
@@ -6790,20 +6979,20 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         setStatus('alert');
         state._lastRisk = describeRisk(riskAfterAI) || 'AI 后风控';
         addLog('⚠ AI 判断后检测到风控，已停止', 'err');
-        tagCard(card, 'not-sent', 'AI 判断后检测到风控，已停止');
+        tagCurrentCard('not-sent', 'AI 判断后检测到风控，已停止');
         state.stopFlag = true;
         return;
       }
 
       if (gate.action === 'reject') {
-        tagCard(card, 'ai-skip', gate.reason || 'AI 判断不匹配');
+        tagCurrentCard('ai-skip', 'AI 判断不匹配：' + (gate.reason || '不符合当前画像和岗位要求'));
         addLog(`✗ ${title || '(无标题)'} | AI 不匹配（${gate.score ?? '-'}）：${gate.reason}${gate.cached ? '（缓存）' : ''}`,
           'skip', buildAISkipDetail({ ...job, sal, gate }));
         const s = loadStats(); s.skipped = (s.skipped || 0) + 1; saveStats(s); refreshStats();
         return;
       }
       if (gate.action === 'skip') {
-        tagCard(card, 'skip', gate.reason || 'AI 失败');
+        tagCurrentCard('skip', gate.reason || 'AI 失败');
         const s = loadStats(); s.skipped = (s.skipped || 0) + 1; saveStats(s); refreshStats();
         return;
       }
@@ -6820,14 +7009,14 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         // 降级放行了，不再打 AI 通过标签，避免误导
         if (gate.local) addLog(`✓ ${title} | ${gate.reason}`);
       } else {
-        tagCard(card, 'ai-pass', gate.reason || `AI 通过 ${gate.score ?? ''}`);
+        tagCurrentCard('ai-pass', gate.reason || `AI 通过 ${gate.score ?? ''}`);
         addLog(`✓ ${title || '(无标题)'} | AI 通过（${gate.score ?? '-'}）：${gate.reason}${gate.cached ? '（缓存）' : ''}`,
           'send', buildAISkipDetail({ ...job, sal, gate }));
       }
     }
 
     if (!state.config.autoSend) {
-      tagCard(card, 'matched', '自动投递已关闭');
+      tagCurrentCard('matched', '自动投递已关闭');
       addLog(`✓ ${title} | 标记通过`, 'send');
       return;
     }
@@ -6846,7 +7035,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     }
     if (!chatBtn) {
       addLog('✗ 未找到 a.op-btn-chat "立即沟通"（点击查看）', 'err', listSuspiciousBtns());
-      tagCard(card, 'not-sent', '未找到当前岗位的沟通按钮');
+      tagCurrentCard('not-sent', '未找到当前岗位的沟通按钮');
       const s = loadStats(); s.errors = (s.errors || 0) + 1; saveStats(s); refreshStats();
       return;
     }
@@ -6859,6 +7048,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
       notSent(deliveryUnavailableReason(job.jobId));
       return;
     }
+    tagCurrentCard('sending', '筛选已通过，正在调用官方沟通并等待回执');
     const resultContact = await performOfficialContact(chatBtn, expected,
       () => deliveryReservationValid(reservation) && state.config.autoSend && rulesStillCurrent() && cardStillMatches(card, expected)
         && snapshotStillCurrent(snapshot, expected, job, card),
@@ -7145,6 +7335,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
     let pendingNavigation = null;
     let backInFlight = false; // 防止 back/forward 重复触发
     const onChange = () => {
+      for (const context of activeContactContexts) contactContextCurrent(context);
       if (location.href === lastHref) {
         if (!state._jobProcessing && !state._detailProcessing && (isListPage() || isDetailPage())) {
           const current = extractJobSnapshot();
@@ -7203,6 +7394,7 @@ Linux 字样本身不是拒绝依据。若实际工作以深入 Linux 内核、U
         : observed.ok ? observed : lastSnapshot || observed;
       const earliestHref = pendingNavigation?.href === fromHref ? pendingNavigation.fromHref : fromHref;
       const result = original.apply(receiver, args);
+      for (const context of activeContactContexts) contactContextCurrent(context);
       const targetJobId = publicJobId(location.href);
       if (pendingNavigation?.href !== fromHref && lastSnapshot && targetJobId
         && matchSnapshotIdentity(observed, { jobId: targetJobId }).ok

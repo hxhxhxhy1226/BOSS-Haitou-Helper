@@ -1720,7 +1720,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v118（旧泛化嵌入式放行不得沿用）', /^v118\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v119（旧泛化嵌入式与飞控结论不得沿用）', /^v119\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2708,8 +2708,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v118（v117 及更早结论自动失效）',
-     /^v118\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v119（v118 及更早结论自动失效）',
+     /^v119\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 
@@ -3006,6 +3006,64 @@ section('51. 合成画像分层与核心能力适配，避免纯深入Linux误�
 }
 
 // ============================================================
+section('52. 飞控职责与完整画像送达模型，专业框架及算法能力不得由MCU经验推定');
+{
+  // These stubbed cases verify transmitted policy, input preservation and result handling, not model accuracy.
+  const portrait = '合成候选人熟悉STM32外设驱动和FreeRTOS，做过传感器采集与FOC电机控制固件。目标是嵌入式实时控制；Linux内核不熟悉，未做过PX4、ArduPilot、ZYNQ硬件或导航算法项目。';
+  const firmware = '负责飞控底层固件与实时任务开发，完成传感器驱动、数据链和RTK接口接入，参与电机及舵机控制。可选择FreeRTOS方向，入职可从已有外设驱动与实时控制基础进入并培养飞控框架能力。';
+  const mandatoryFramework = '负责ZYNQ硬件设计、PX4/ArduPilot飞控框架与HIL仿真测试；必须独立完成ZYNQ板级硬件、VxWorks平台移植和HIL测试，不提供基础培养或可选固件分支。';
+  const algorithm = '核心工作为高级导航算法、控制律设计、状态估计和SLAM；必须独立完成上述算法研发，普通电机控制固件经验不能替代该要求。';
+  const cases = [
+    { id: 'FLIGHT_REALTIME_FIRMWARE', jd: firmware, match: true, reason: '实时固件与外设项目相关，可选择FreeRTOS方向' },
+    { id: 'FLIGHT_NAME_ONLY', jd: '飞控软件工程师，公司平台包括ARM/ZYNQ。当前职责未写明。', match: false, reason: '名称与平台不能证明当前核心职责适配', custom: true },
+    { id: 'FLIGHT_CORE_FRAMEWORK_GAP', jd: mandatoryFramework, match: false, reason: '必备ZYNQ硬件和专业平台能力未验证', custom: true },
+    { id: 'FLIGHT_CORE_ALGORITHM_GAP', jd: firmware + '\n所有候选人仍必须承担：' + algorithm, match: false, reason: '固件关联不能覆盖必备高级导航算法缺口' },
+    { id: 'FLIGHT_PURE_LINUX', jd: '飞控Linux软件工程师，必须独立承担Linux内核和PCIe驱动开发，没有可选MCU/RTOS分支。', match: false, reason: '深入Linux为核心且画像明确不熟悉' },
+  ];
+  let emittedRules;
+  for (const c of cases) {
+    resetAll();
+    setCfg(semanticCfg({ aiUserPortrait: portrait, aiPromptTemplate: c.custom ? '自定义模板：判断是否适合投递，只输出JSON。' : '', aiCacheEnabled: false }));
+    let messages;
+    netHandler = (o) => {
+      messages = JSON.parse(o.data).messages;
+      reply(o, { choices: [{ message: { content: JSON.stringify({ match: c.match, score: c.match ? 85 : 25, reason: c.reason }) } }] });
+    };
+    const screened = await BH.aiScreen({ jobId: c.id, title: '飞控软件工程师', company: '合成测试公司', jd: c.jd });
+    const rules = messages[0].content, input = messages[1].content;
+    emittedRules = rules;
+    ok(c.id + '：完整画像缺口及实际JD送达模型', input.includes(portrait) && input.includes(c.jd));
+    ok(c.id + '：默认或自定义模板均收到飞控职责与能力规则',
+       rules.includes('飞控/飞行控制器岗位可以属于 MCU/RTOS 嵌入式实时控制研发')
+       && rules.includes('只有“飞控”标题、公司业务或兴趣不能证明能力匹配')
+       && (!c.custom || rules.includes('自定义模板：')));
+    ok(c.id + '：保留模型真实返回结论，不以飞控关键词强行放行',
+       screened.ok && screened.match === c.match && screened.reason === c.reason);
+  }
+  ok('传感器、数据链与RTK接口可与已有实时固件经验形成具体关联',
+     emittedRules.includes('传感器驱动、数据链/RTK 接口及电机/舵机控制等工作')
+     && emittedRules.includes('不得只因缺少 MCU 字样或飞控领域名称不同而拒绝'));
+  ok('ARM/ZYNQ、专业框架与HIL不是MCU能力的同义词',
+     emittedRules.includes('ARM/ZYNQ 平台、PX4/ArduPilot 框架和 HIL 测试不自动等价于 MCU 能力'));
+  ok('FreeRTOS项目不证明已会其他必备平台、框架或硬件',
+     emittedRules.includes('FreeRTOS 项目经验也不能自动证明已会 uCOS/VxWorks、ZYNQ 硬件、专业飞控框架或 HIL 必备核心工作'));
+  ok('单片机或FOC项目不自动证明高级导航、控制律与状态估计能力',
+     emittedRules.includes('高级导航算法、控制律设计、状态估计、SLAM 等若为岗位必备核心')
+     && emittedRules.includes('普通单片机或 FOC 电机项目不能自动证明这些专业能力'));
+
+  resetAll(); setCfg(semanticCfg({ aiUserPortrait: portrait, aiCacheEnabled: true }));
+  const target = { jobId: 'OLD_FLIGHT_DIRECTION_CACHE', title: '飞控软件工程师', company: '合成测试公司', jd: firmware };
+  BH.setAICache(target.jobId, { match: false, reason: '旧版只认MCU字样而拒绝飞控固件' }, target);
+  const stale = structuredClone(store.get('boss_helper_ai_cache_v1'));
+  stale[target.jobId].pf = stale[target.jobId].pf.replace(/^v\d+\|/, 'v118|');
+  store.set('boss_helper_ai_cache_v1', stale);
+  win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(stale));
+  netHandler = (o) => reply(o, { choices: [{ message: { content: '{"match":true,"reason":"实际实时固件职责与画像相符"}' } }] });
+  const current = await BH.aiScreen(target);
+  ok('v118旧飞控拒绝缓存作废并重新请求模型', current.ok && current.match && !current.cached && netCalls === 1);
+  resetAll();
+}
+
 console.log(results.join('\n'));
 console.log('\n============================================');
 console.log(`结果： ${pass} 通过 / ${fail} 失败${skipped ? ` / ${skipped} 跳过` : ''} （共 ${pass + fail + skipped} 条断言）`);

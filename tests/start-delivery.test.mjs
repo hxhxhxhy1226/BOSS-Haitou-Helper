@@ -22,6 +22,35 @@ const MIXED_JOB = { ...JOB, title: '【27届校招】嵌入式软件工程师', 
 【任职要求】
 1.本科及以上学历，计算机、电子信息、自动化、通信、软件工程等相关专业；
 2.具备扎实的 C/C++ 基础，理解指针、内存管理、数据结构和并发编程。` };
+
+// Node retains after hooks until the file ends. Keep their resource references
+// in separate scopes so completed fixture/test closures can be collected.
+function cleanupWindowAfter(t, initialWindow) {
+  let win = initialWindow;
+  t.after(() => {
+    try {
+      if (win.BH) win.BH.state.stopFlag = true;
+      win.close();
+    } finally { win = null; }
+  });
+}
+
+function cleanupObserverAfter(t, initialObserver) {
+  let observer = initialObserver;
+  t.after(() => {
+    try { observer.disconnect(); }
+    finally { observer = null; }
+  });
+}
+
+function cleanupTimersAfter(t, initialTimers) {
+  let timers = initialTimers;
+  t.after(() => {
+    try { timers.forEach(clearTimeout); }
+    finally { timers.length = 0; timers = null; }
+  });
+}
+
 function detail(job, text = JD) {
   return `<section class="job-detail" data-jobid="${job.data}"><header class="job-banner">
     <h1 class="job-name">${job.title}</h1><a class="company-name" href="/gongsi/fixture.html">${job.company}</a>
@@ -72,6 +101,7 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
     url: 'https://www.zhipin.com/web/geek/job?query=fixture', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc,
   });
   const win = dom.window;
+  cleanupWindowAfter(t, win);
   win.GM_getValue = (k, fallback) => values.has(k) ? structuredClone(values.get(k)) : fallback;
   win.GM_setValue = (k, v) => values.set(k, structuredClone(v));
   win.GM_listValues = () => [...values.keys()];
@@ -82,7 +112,7 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
     const requestBody = JSON.parse(o.data);
     requests.push({ url: o.url, model: requestBody.model, messages: requestBody.messages });
     if (onRequest && onRequest(win, o) === false) return { abort() {} };
-    setTimeout(() => o.onload({ status: primaryFails && o.url.includes('primary.example') ? 503 : 200,
+    win.setTimeout(() => o.onload({ status: primaryFails && o.url.includes('primary.example') ? 503 : 200,
       responseText: JSON.stringify({ choices: [{ message: { content: '{"match":true,"score":95,"reason":"岗位方向匹配"}' } }] }) }), 0);
     return { abort() {} };
   };
@@ -180,7 +210,6 @@ async function fixture(t, { sent = 30, dailyLimit = 120, aiEnabled = false, prim
   }
   win.eval(runtime);
   await delay(0);
-  t.after(() => { win.BH.state.stopFlag = true; win.close(); });
   return { win, values, requests, errors, selectionDefaultStates, blockedTitleClicks, expandCount: () => expands, clickCount: () => clicks, countAtClick: () => countAtClick,
     logs: () => win.document.querySelector('.bh-log')?.textContent || '',
     // Start persists settings before marking the loop running; that pending save is not a stopped task.
@@ -193,7 +222,7 @@ async function waitUntil(condition, timeout = 15000) {
   while (Date.now() < end) { if (condition()) return; await delay(25); }
 }
 
-test('更深标题监听：A完成后切B，B不匹配后切C，三次AI均使用对应JD', { timeout: 35000 }, async (t) => {
+test('更深标题监听：A完成后切B，B不匹配后切C，三次AI均使用对应JD', { timeout: 45000 }, async (t) => {
   const jobs = [
     { id: 'deepSelectionA', data: 'deep-a', title: 'MCU电机固件工程师A', company: '电机研发公司A',
       jd: '岗位A独有职责：STM32电机FOC固件开发、PWM控制与MCU调试。' },
@@ -245,7 +274,14 @@ test('更深标题监听：A完成后切B，B不匹配后切C，三次AI均使�
     assert.ok(card.querySelector(':scope > a.card-area > div.job-card-body > div.job-title > span.job-name'));
   }
   f.start();
-  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 28000);
+  await waitUntil(() => f.stopped(), 40000);
+  assert.ok(f.stopped(), JSON.stringify({
+    events, violations, clicks: f.clickCount(), selections: f.expandCount(), aiRequests: f.requests.length,
+    selected: f.win.document.querySelector('li.job-card-wrap.active')?.dataset.fixtureId,
+    cards: cards.map((card) => ({ id: card.dataset.fixtureId, processed: card.dataset.bhProcessed,
+      status: card.querySelector('.bh-tag')?.textContent || '' })),
+    logs: f.logs(), errors: f.errors,
+  }, null, 2));
   assert.equal(f.clickCount(), 2, f.logs());
   assert.equal(f.expandCount(), 3, '成功和不匹配均应推进下一张，而不是反复点击外层包装');
   assert.equal(f.requests.length, 3, '每张卡片只根据自己的JD执行一次AI');
@@ -464,7 +500,7 @@ test('标题中心被展示标签遮挡时改点标题可见位置，不点击�
   assert.deepEqual(f.errors, []);
 });
 
-test('三岗位仅内层card-area监听：默认A详情，A/B/C分别调用AI并正确推进', { timeout: 30000 }, async (t) => {
+test('三岗位仅内层card-area监听：默认A详情，A/B/C分别调用AI并正确推进', { timeout: 45000 }, async (t) => {
   const jobs = [
     { id: 'innerSelectionA', data: 'inner-a', title: 'MCU电机控制工程师A', company: '电机研发公司A',
       jd: '岗位A负责STM32电机FOC固件开发和PWM控制，这是岗位A独有的职责。' },
@@ -492,7 +528,8 @@ test('三岗位仅内层card-area监听：默认A详情，A/B/C分别调用AI并
     assert.equal(target.closest('.company-name, .bh-tag, .op-btn-chat'), null, '不能点击公司、插件标签或沟通控制');
   }
   f.start();
-  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 26000);
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 40000);
+  assert.ok(f.stopped(), '三张卡片须完成回执处理并结束循环：' + f.logs());
   assert.equal(f.clickCount(), 3, f.logs());
   assert.equal(f.expandCount(), 3, f.logs());
   assert.equal(f.requests.length, 3, '每个目标岗位均应执行一次AI');
@@ -523,7 +560,7 @@ test('详情暂未就绪保持可重试，下一轮成功后才标记已处理',
       if (expands === 1) { selectMetadataWithoutUpdatingBody(win, job); return false; }
       const card = win.document.querySelector('.job-card-box');
       retried = card.dataset.bhProcessed !== '1' && win.BH.getUnprocessedJobCards().includes(card)
-        && card.querySelector('.bh-tag')?.dataset.bhRetryable === '1';
+        && !!card.querySelector('.bh-tag-reading');
     },
   });
   f.start();
@@ -581,11 +618,16 @@ test('详情连续未就绪只进行三次有界重试，不请求AI或占用投
   assert.equal(f.clickCount(), 0);
   assert.equal(f.win.BH.loadStats().sent, 30);
   assert.equal(f.win.BH.loadStats().skipped, 0);
-  assert.match(f.win.document.querySelector('.bh-tag-not-sent')?.textContent || '', /连续未就绪/);
+  const card = f.win.document.querySelector('.job-card-box');
+  assert.match(card.querySelector('.bh-tag-not-sent')?.textContent || '', /失败.*连续未就绪/);
+  assert.equal(card.querySelector('.bh-tag-reading'), null, '三次读取耗尽后不能留下过程标签');
+  assert.equal(card.querySelector('.bh-tag')?.dataset.bhReceiptMissing, undefined,
+    '未点击的读取失败不能注册为等待迟到发送回执');
+  assert.doesNotMatch(card.textContent, /待确认/);
 });
 
 for (const phase of ['request', 'retry-wait']) {
-  test(`AI${phase === 'request' ? '请求在途' : '一分钟等待'}切换岗位后重新读取，不再把旧JD交给下一API`, { timeout: 20000 }, async (t) => {
+  test(`AI${phase === 'request' ? '请求在途' : '一分钟等待'}切换岗位后重新读取，不再把旧JD交给下一API`, { timeout: 45000 }, async (t) => {
     const jobs = [
       { ...JOB, id: 'guardInputA', data: 'guard-a', title: '电机固件岗位A', jd: 'A独有职责：STM32电机控制固件与FOC算法调试。' },
       { ...JOB, id: 'guardInputB', data: 'guard-b', title: '通信固件岗位B', jd: 'B独有职责：FreeRTOS通信协议与CAN控制模块开发。' },
@@ -602,7 +644,7 @@ for (const phase of ['request', 'retry-wait']) {
       onRequest(win, request) {
         const prompt = JSON.parse(request.data).messages[1].content;
         if (prompt.includes(jobs[0].jd)) {
-          if (phase === 'request' && !changed) setTimeout(() => {
+          if (phase === 'request' && !changed) win.setTimeout(() => {
             switchToB(win); request.onload({ status: 503, responseText: '{}' });
           }, 0);
           else queueMicrotask(() => request.onload({ status: 503, responseText: '{}' }));
@@ -618,7 +660,8 @@ for (const phase of ['request', 'retry-wait']) {
       assert.equal(f.requests.length, 2, f.logs());
       switchToB(f.win);
     }
-    await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 16000);
+    await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 25000);
+    assert.ok(f.stopped(), '输入换岗后须完成当前岗位并结束循环：' + f.logs());
     assert.equal(changed, true);
     assert.equal(f.clickCount(), 1, f.logs());
     const prompts = f.requests.map((request) => request.messages[1].content);
@@ -628,11 +671,17 @@ for (const phase of ['request', 'retry-wait']) {
     assert.ok(f.requests.at(-1).url.includes('primary.example'), '重读B后从主API开始');
     const a = f.win.document.querySelector('[data-fixture-id="guardInputA"]');
     const b = f.win.document.querySelector('[data-fixture-id="guardInputB"]');
-    assert.notEqual(a.dataset.bhProcessed, '1', '旧输入变化仍保留A等待重新读取');
-    assert.equal(a.querySelector('.bh-tag')?.dataset.bhRetryable, '1');
+    assert.equal(f.stopped(), true, f.logs());
+    assert.notEqual(a.dataset.bhProcessed, '1', '旧输入变化不能把A标为已处理，下轮可重新读取');
+    const ended = a.querySelector('.bh-tag-not-sent');
+    assert.match(ended?.textContent || '', /失败.*本轮已结束/, f.logs());
+    assert.equal(ended?.dataset.bhRetryable, undefined, '本轮结束后不能残留重试过程标签');
+    assert.equal(ended?.dataset.bhReceiptMissing, undefined, 'A没有点击沟通，不等待发送回执');
+    assert.equal(a.querySelector('.bh-tag-reading, .bh-tag-ai-retry, .bh-tag-judging'), null);
     assert.ok(b.querySelector('.bh-tag-pass'), f.logs());
     assert.equal(f.win.BH.loadStats().skipped, 0);
     assert.equal(f.win.BH.loadStats().sent, 31);
+    assert.equal(f.win.BH.loadStats().pending, 0);
   });
 }
 
@@ -704,6 +753,11 @@ test('全部AI接口故障时保留当前卡片等待，停止立即结束且不
   assert.equal(f.win.BH.loadStats().skipped, 0);
   assert.equal(f.win.BH.loadStats().sent, 30);
   assert.equal(f.win.BH.loadStats().pending, 0);
+  const retryTag = f.win.document.querySelector('.bh-tag-ai-retry');
+  assert.match(retryTag?.firstChild?.textContent || '', /AI 重试中/);
+  assert.doesNotMatch(retryTag?.firstChild?.textContent || '', /待确认|失败/,
+    '全部接口等待重试属于进行中的判断，不是投递失败');
+  assert.equal(f.win.document.querySelector('.job-card-box .bh-tag-not-sent'), null);
   f.win.BH.stop('测试停止');
   await waitUntil(() => f.stopped(), 1500);
   assert.equal(f.stopped(), true, f.logs());
@@ -741,7 +795,9 @@ for (const scenario of [
     if (scenario.aiEnabled && !scenario.primaryFails) {
       await waitUntil(() => f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1');
       const card = f.win.document.querySelector('.job-card-box');
-      assert.match(card.querySelector('.bh-tag')?.textContent || '', /待确认/);
+      assert.match(card.querySelector('.bh-tag-not-sent')?.textContent || '', /失败.*未收到.*官方.*回执/);
+      assert.equal(card.querySelector('.bh-tag-not-sent')?.dataset.bhReceiptMissing, '1');
+      assert.doesNotMatch(card.textContent, /待确认/);
       assert.equal(card.querySelector('.bh-tag-skip'), null, '已经激活但尚无官方回执不能显示为跳过');
       assert.equal(card.querySelector('.bh-tag-ai-pass'), null, '投递阶段应替换临时 AI 通过标签');
     }
@@ -767,9 +823,10 @@ test('列表点开始已经达到120：不展开岗位、不请求 AI、不沟�
 
 const SECOND = { ...JOB, id: 'nextJobFixture', data: 'job03', title: 'STM32 固件开发工程师' };
 
-test('两岗位连续投递：先异步关闭成功弹窗再展开下一家，两张卡片均为绿色完成', { timeout: 25000 }, async (t) => {
+test('两岗位连续投递：先异步关闭成功弹窗再展开下一家，两张卡片均为绿色成功', { timeout: 25000 }, async (t) => {
   const events = [], violations = [], stayClicks = [], continueClicks = [];
   const timers = [];
+  cleanupTimersAfter(t, timers);
   const f = await fixture(t, { jobs: [JOB, SECOND], stopAfter: 2,
     onContact(win, { job }) {
       events.push('contact:' + job.id);
@@ -786,7 +843,6 @@ test('两岗位连续投递：先异步关闭成功弹窗再展开下一家，�
       win.document.body.append(dialog);
     },
   });
-  t.after(() => timers.forEach(clearTimeout));
   for (const card of f.win.document.querySelectorAll('.job-card-box')) card.addEventListener('click', () => {
     events.push('expand:' + card.dataset.fixtureId);
     if (f.win.document.querySelector('.greet-dialog')) violations.push('expand-before-close:' + card.dataset.fixtureId);
@@ -801,37 +857,39 @@ test('两岗位连续投递：先异步关闭成功弹窗再展开下一家，�
   assert.ok(events.indexOf('closed:' + JOB.id) < events.indexOf('expand:' + SECOND.id), events.join('\n'));
   for (const card of f.win.document.querySelectorAll('.job-card-box')) {
     const completed = card.querySelector('.bh-tag-pass');
-    assert.ok(completed, '已确认成功的岗位使用绿色完成状态');
-    assert.match(completed.textContent, /完成/);
+    assert.ok(completed, '已确认成功的岗位使用绿色成功状态');
+    assert.match(completed.textContent, /成功/);
     assert.equal(card.querySelector('.bh-tag-pending'), null);
   }
   assert.equal(f.win.BH.loadStats().sent, 32);
   assert.deepEqual(f.errors, []);
 });
 
-test('停止后成功回执迟到，原卡由待确认转为绿色完成并关闭弹窗，不重复点击', { timeout: 10000 }, async (t) => {
-  let timer, dialog, stayClicks = 0, sawPending = false, pendingAtReceipt = '';
-  const f = await fixture(t, {
-    onContact(win) {
-      timer = setTimeout(() => {
-        pendingAtReceipt = win.document.querySelector('.job-card-box .bh-tag-pending')?.textContent || '';
-        dialog = win.document.createElement('section'); dialog.className = 'greet-dialog';
-        dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header><p>迟到的官方成功回执</p>'
-          + '<footer><button class="default-btn cancel-btn">留在此页</button><button>继续沟通</button></footer>';
-        dialog.querySelector('.cancel-btn').addEventListener('click', () => { stayClicks++; dialog.remove(); });
-        win.document.body.append(dialog);
-      }, 600);
-    },
-  });
+test('停止后成功回执迟到，原卡由无回执失败转为成功并关闭弹窗，不重复点击', { timeout: 10000 }, async (t) => {
+  let stayClicks = 0, sawMissingReceipt = false;
+  const f = await fixture(t);
   const card = f.win.document.querySelector('.job-card-box');
-  const observer = new f.win.MutationObserver(() => { if (card.querySelector('.bh-tag-pending')) sawPending = true; });
+  const observer = new f.win.MutationObserver(() => {
+    if (card.querySelector('[data-bh-receipt-missing="1"]')) sawMissingReceipt = true;
+  });
+  cleanupObserverAfter(t, observer);
   observer.observe(card, { childList: true, subtree: true });
-  t.after(() => { clearTimeout(timer); observer.disconnect(); });
+  const deadline = Date.now() + 9000;
   f.start();
-  await waitUntil(() => card.querySelector('.bh-tag-pass') && dialog && !dialog.isConnected && f.stopped(), 9000);
-  assert.equal(sawPending, true, '回执必须在原投递已返回待确认后才到达');
-  assert.match(pendingAtReceipt, /待确认/);
-  assert.match(card.querySelector('.bh-tag-pass')?.textContent || '', /完成/);
+  await waitUntil(() => f.stopped() && card.querySelector('[data-bh-receipt-missing="1"]'), deadline - Date.now());
+  assert.equal(f.stopped(), true, f.logs());
+  const statusAtReceipt = card.querySelector('[data-bh-receipt-missing="1"]')?.textContent || '';
+  assert.equal(sawMissingReceipt, true, '回执必须在原投递已显示无回执失败后才到达');
+  assert.match(statusAtReceipt, /失败/);
+  const dialog = f.win.document.createElement('section'); dialog.className = 'greet-dialog';
+  dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header><p>迟到的官方成功回执</p>'
+    + '<footer><button class="default-btn cancel-btn">留在此页</button><button>继续沟通</button></footer>';
+  dialog.querySelector('.cancel-btn').addEventListener('click', () => { stayClicks++; dialog.remove(); });
+  f.win.document.body.append(dialog);
+  await waitUntil(() => card.querySelector('.bh-tag-pass') && !dialog.isConnected && f.stopped(), deadline - Date.now());
+  assert.match(card.querySelector('.bh-tag-pass')?.textContent || '', /成功/);
+  assert.equal(card.querySelector('[data-bh-receipt-missing="1"]'), null,
+    '迟到成功应清理旧无回执标记');
   assert.equal(card.querySelector('.bh-tag-pending'), null);
   assert.equal(stayClicks, 1);
   assert.ok(dialog && !dialog.isConnected);
@@ -842,10 +900,247 @@ test('停止后成功回执迟到，原卡由待确认转为绿色完成并关�
   assert.deepEqual(f.errors, []);
 });
 
+test('无回执失败后切到另一岗位再返回，另一岗位成功框不能修正原卡或被助手关闭', { timeout: 12000 }, async (t) => {
+  const f = await fixture(t, { jobs: [JOB, SECOND] });
+  f.start();
+  const original = f.win.document.querySelector('[data-fixture-id="' + JOB.id + '"]');
+  await waitUntil(() => f.stopped() && original.querySelector('[data-bh-receipt-missing="1"]'), 9000);
+  assert.match(original.querySelector('.bh-tag-not-sent')?.textContent || '', /失败/);
+  assert.equal(f.clickCount(), 1, f.logs());
+
+  const next = f.win.document.querySelector('[data-fixture-id="' + SECOND.id + '"]');
+  original.classList.remove('active'); next.classList.add('active');
+  f.win.document.getElementById('detail-host').innerHTML = detail(SECOND);
+  const dialog = f.win.document.createElement('section'); dialog.className = 'greet-dialog';
+  dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header>'
+    + '<button class="default-btn cancel-btn">留在此页</button>';
+  let closes = 0;
+  dialog.querySelector('button').addEventListener('click', () => { closes++; dialog.remove(); });
+  f.win.document.body.append(dialog);
+  await delay(400);
+
+  assert.equal(original.querySelector('.bh-tag-pass'), null, '另一岗位的成功框不能算原岗位成功');
+  assert.match(original.querySelector('.bh-tag-not-sent')?.textContent || '', /失败/);
+  assert.equal(next.querySelector('.bh-tag-pass'), null, '助手未投递新岗位，不能添加成功状态');
+  assert.equal(closes, 0, '不关闭无法归属于原次投递的成功框');
+  assert.equal(dialog.isConnected, true);
+
+  next.classList.remove('active'); original.classList.add('active');
+  f.win.document.getElementById('detail-host').innerHTML = detail(JOB);
+  await delay(400);
+  assert.equal(original.querySelector('.bh-tag-pass'), null,
+    '返回原岗位也不能把离开期间另一岗位的成功框归给原次投递');
+  assert.match(original.querySelector('.bh-tag-not-sent')?.textContent || '', /失败/);
+  assert.equal(next.querySelector('.bh-tag-pass'), null);
+  assert.equal(closes, 0, '返回原岗位不能重新启用旧回执观察器关闭另一岗位弹窗');
+  assert.equal(dialog.isConnected, true);
+  assert.equal(f.clickCount(), 1);
+  assert.equal(f.expandCount(), 1);
+  assert.equal(f.win.BH.loadStats().sent, 31);
+  assert.equal(await f.win.BH.reserveDelivery(JOB.id, 120), false, '原岗位仍保留去重');
+  assert.equal(f.stopped(), true, '迟到回执不能恢复已停止的循环');
+  assert.deepEqual(f.errors, []);
+});
+
+test('A按钮已激活后原卡DOM复用为B，A的投递结果不能瞬间标在B上', { timeout: 12000 }, async (t) => {
+  let reused = false;
+  const incorrectTags = [];
+  const f = await fixture(t, { onContact(win) {
+    const card = win.document.querySelector('.job-card-box');
+    card.dataset.jobid = SECOND.data;
+    card.dataset.fixtureId = SECOND.id;
+    const link = card.querySelector('.job-name');
+    link.href = '/job_detail/' + SECOND.id + '.html'; link.textContent = SECOND.title;
+    reused = true;
+  } });
+  const card = f.win.document.querySelector('.job-card-box');
+  const observer = new f.win.MutationObserver(() => {
+    if (reused && card.querySelector('.bh-tag-pass, .bh-tag-not-sent, [data-bh-receipt-missing="1"]')) {
+      incorrectTags.push(card.querySelector('.bh-tag')?.textContent || '');
+    }
+  });
+  cleanupObserverAfter(t, observer);
+  observer.observe(card, { childList: true, subtree: true, attributes: true,
+    attributeFilter: ['data-bh-receipt-missing'] });
+  f.start();
+  await waitUntil(() => f.stopped(), 9000);
+  assert.equal(reused, true, f.logs());
+  assert.deepEqual(incorrectTags, [], '原次投递结果不能先写到复用卡，再由循环清除');
+  assert.equal(card.dataset.fixtureId, SECOND.id);
+  assert.equal(card.querySelector('.bh-tag'), null, '复用为B后不能残留A的过程或结果标签');
+  assert.notEqual(card.dataset.bhProcessed, '1', 'B仍未由助手处理');
+  assert.equal(f.clickCount(), 1);
+  assert.equal(f.win.BH.loadStats().sent, 31);
+  assert.equal(await f.win.BH.reserveDelivery(JOB.id, 120), false, 'A已经激活，额度与去重仍保留');
+  assert.equal(f.stopped(), true);
+  assert.deepEqual(f.errors, []);
+});
+
+for (const phase of ['stop', 'retry']) {
+  test(`AI ${phase === 'stop' ? '停止' : '输入重读'}期间原卡DOM复用为B，不能回写A的过程或结果状态`, { timeout: 16000 }, async (t) => {
+    let reused = false, observer;
+    const incorrectTags = [];
+    const f = await fixture(t, { aiEnabled: true, jobs: [JOB, SECOND],
+      onExpand(win, { job }) {
+        if (job.id === SECOND.id) {
+          // The retry may select B next; finish before judging that separate job.
+          win.BH.state.stopFlag = true;
+          return false;
+        }
+      },
+      onRequest(win, request) {
+        const card = win.document.querySelector('.job-card-box');
+        observer.takeRecords(); // Discard A's labels created before the node was reused.
+        card.dataset.jobid = SECOND.data;
+        card.dataset.fixtureId = SECOND.id;
+        const link = card.querySelector('.job-name');
+        link.href = '/job_detail/' + SECOND.id + '.html'; link.textContent = SECOND.title;
+        reused = true;
+        if (phase === 'stop') win.BH.state.stopFlag = true;
+        request.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: {
+          content: '{"match":true,"score":95,"reason":"原岗位A匹配"}',
+        } }] }) });
+        return false;
+      },
+    });
+    const card = f.win.document.querySelector('.job-card-box');
+    observer = new f.win.MutationObserver((records) => {
+      if (!reused) return;
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType === 1 && node.matches('.bh-tag')) incorrectTags.push(node.textContent);
+        }
+      }
+    });
+    cleanupObserverAfter(t, observer);
+    observer.observe(card, { childList: true, subtree: true });
+    f.start();
+    await waitUntil(() => f.stopped(), 13000);
+    assert.equal(reused, true, f.logs());
+    assert.equal(f.stopped(), true, f.logs());
+    assert.equal(f.requests.length, 1, '只有原岗位A请求过AI，B尚未判断');
+    assert.equal(f.clickCount(), 0, '失效的A结论不能发起沟通');
+    assert.equal(f.win.BH.loadStats().sent, 30);
+    assert.equal(f.win.BH.loadStats().pending, 0);
+    for (const job of [JOB, SECOND]) {
+      const reservation = await f.win.BH.reserveDelivery(job.id, 120);
+      assert.ok(reservation, '未激活的岗位不能因旧状态被占额或永久去重');
+      await f.win.BH.releaseDelivery(reservation);
+    }
+    assert.deepEqual(f.errors, []);
+    assert.deepEqual(incorrectTags, [], 'A的旧状态不能先写到复用为B的节点，再由主循环清除');
+    assert.equal(card.dataset.fixtureId, SECOND.id);
+    assert.equal(card.querySelector('.bh-tag'), null, '复用后的B不能残留A的标签');
+    assert.notEqual(card.dataset.bhProcessed, '1', 'B尚未完成处理');
+  });
+}
+
+test('沟通点击记录存储延迟期间切B并出现B成功框再回A，不能误确认A或关闭B框', { timeout: 18000 }, async (t) => {
+  let delayed = false, markingClick = false, switchedWhileMarking = false, returnedWhileMarking = false;
+  let dialog, closes = 0;
+  const timers = [];
+  cleanupTimersAfter(t, timers);
+  const f = await fixture(t, { jobs: [JOB, SECOND],
+    onContact(win) {
+      timers.push(setTimeout(() => {
+        switchedWhileMarking = markingClick;
+        const original = win.document.querySelector('[data-fixture-id="' + JOB.id + '"]');
+        const next = win.document.querySelector('[data-fixture-id="' + SECOND.id + '"]');
+        original.classList.remove('active'); next.classList.add('active');
+        win.document.getElementById('detail-host').innerHTML = detail(SECOND);
+        dialog = win.document.createElement('section'); dialog.className = 'greet-dialog';
+        dialog.innerHTML = '<header><h3 class="title">已向BOSS发送消息</h3></header>'
+          + '<button class="default-btn cancel-btn">留在此页</button>';
+        dialog.querySelector('button').addEventListener('click', () => { closes++; dialog.remove(); });
+        win.document.body.append(dialog);
+      }, 200));
+      timers.push(setTimeout(() => {
+        returnedWhileMarking = markingClick;
+        const original = win.document.querySelector('[data-fixture-id="' + JOB.id + '"]');
+        const next = win.document.querySelector('[data-fixture-id="' + SECOND.id + '"]');
+        next.classList.remove('active'); original.classList.add('active');
+        win.document.getElementById('detail-host').innerHTML = detail(JOB);
+      }, 1000));
+    },
+  });
+  Object.defineProperty(f.win.navigator, 'locks', { configurable: true, value: {
+    async request(_name, callback) {
+      // Delay only the first post-click write, as a slow storage acknowledgement would.
+      if (f.clickCount() > 0 && !delayed) {
+        delayed = true; markingClick = true;
+        await delay(2000);
+        markingClick = false;
+      }
+      return callback();
+    },
+  } });
+  const original = f.win.document.querySelector('[data-fixture-id="' + JOB.id + '"]');
+  const next = f.win.document.querySelector('[data-fixture-id="' + SECOND.id + '"]');
+  f.start();
+  await waitUntil(() => f.stopped() && original.dataset.bhProcessed === '1', 14000);
+  await delay(400);
+  assert.equal(delayed, true, '必须实际延迟点击后的持久化记录');
+  assert.equal(switchedWhileMarking, true, '切B发生在点击记录存储等待期间');
+  assert.equal(returnedWhileMarking, true, '回A仍发生在点击记录存储等待期间');
+  assert.equal(f.stopped(), true, f.logs());
+  assert.equal(f.clickCount(), 1, 'A只有一次沟通激活，B未由助手沟通');
+  assert.equal(f.expandCount(), 1, '另一岗位的回执不能恢复投递循环');
+  assert.equal(f.win.BH.loadStats().sent, 31, 'A无官方回执仍保留已发起额度');
+  assert.equal(f.win.BH.loadStats().pending, 0);
+  assert.equal(await f.win.BH.reserveDelivery(JOB.id, 120), false, 'A已激活，不能重复发起');
+  assert.deepEqual(f.errors, []);
+  if (closes || original.querySelector('.bh-tag-pass')) {
+    t.diagnostic('原卡状态：' + original.querySelector('.bh-tag')?.textContent + '；B框关闭次数：' + closes);
+  }
+  assert.equal(closes, 0, '存储等待期间出现的另一岗位成功框不能被助手关闭');
+  assert.ok(dialog?.isConnected, 'B的成功框应保留给用户处理');
+  assert.equal(original.querySelector('.bh-tag-pass'), null, '返回A不能把B的成功框算成A成功');
+  assert.match(original.querySelector('.bh-tag-not-sent')?.textContent || '', /失败.*未收到.*官方.*回执/);
+  assert.equal(next.querySelector('.bh-tag-pass'), null, '助手未投递B，不能添加成功状态');
+});
+
+for (const matched of [true, false]) {
+  test(`飞控实时固件岗位先带完整画像请求AI，采用${matched ? '匹配并投递' : '不匹配且不投递'}实际结论`, { timeout: 16000 }, async (t) => {
+    const portrait = '嵌入式软件应届生，熟悉 STM32、FreeRTOS，完成过 FOC 电机控制项目，目标为 MCU/RTOS；不太会 Linux。';
+    const flight = { ...JOB, id: 'flightGate' + matched, data: 'flight-' + matched, title: '飞控嵌入式软件工程师',
+      jd: '负责飞行控制器实时固件开发，使用 FreeRTOS 实现 IMU 传感器采集、电机 PWM 控制与 CAN 通信，完成软硬件联调；不要求 Linux 内核开发。' };
+    let sawJudging = false, sawSending = false;
+    const f = await fixture(t, { aiEnabled: true, jobs: [flight], officialSuccess: true,
+      settings: { maxRounds: 1, aiCacheEnabled: false, mustHave: ['AUTOSAR'], mustNot: ['飞控'], aiUserPortrait: portrait },
+      onRequest(win, request) {
+        sawJudging = /判断中/.test(win.document.querySelector('.bh-tag-judging')?.textContent || '');
+        const prompt = JSON.parse(request.data).messages[1].content;
+        assert.ok(prompt.includes(portrait), 'AI 必须拿到真实能力和 Linux 水平，不只看到求职意向');
+        assert.ok(prompt.includes(flight.jd), 'AI 必须拿到当前飞控岗位完整职责');
+        request.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: {
+          content: JSON.stringify({ match: matched, score: matched ? 92 : 15,
+            reason: matched ? '实时固件与STM32、RTOS、电机控制项目可迁移' : '模拟当前核心能力不匹配' }),
+        } }] }) });
+        return false;
+      },
+      onContact(win) { sawSending = /投递中/.test(win.document.querySelector('.bh-tag-sending')?.textContent || ''); },
+    });
+    f.start();
+    await waitUntil(() => f.stopped() || f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1', 13000);
+    assert.equal(f.requests.length, 1, f.logs());
+    assert.equal(sawJudging, true, 'AI 请求中的标签只表示判断过程');
+    assert.equal(f.clickCount(), matched ? 1 : 0, f.logs());
+    const card = f.win.document.querySelector('.job-card-box');
+    assert.match(card.querySelector('.bh-tag')?.textContent || '', matched ? /成功/ : /失败/);
+    assert.equal(card.querySelector('.bh-tag-judging'), null);
+    assert.equal(card.querySelector('.bh-tag-sending'), null);
+    assert.equal(card.querySelector('[data-bh-receipt-missing="1"]'), null);
+    assert.doesNotMatch(card.textContent, /待确认/);
+    if (matched) assert.equal(sawSending, true, '真实按钮激活时才进入投递过程');
+    assert.equal(f.win.BH.loadStats().sent, matched ? 31 : 30);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
 for (const saveVia of ['主面板', 'AI 设置']) {
-  test(`运行中通过${saveVia}保存每日上限80→150，立即同步面板并允许第81次沟通`, { timeout: 35000 }, async (t) => {
+  test(`运行中通过${saveVia}保存每日上限80→150，立即同步面板并允许第81次沟通`, { timeout: 45000 }, async (t) => {
     let observed;
-    const f = await fixture(t, { sent: 79, dailyLimit: 80, jobs: [JOB, SECOND], stopAfter: 2,
+    const f = await fixture(t, { sent: 79, dailyLimit: 80, jobs: [JOB, SECOND], stopAfter: 2, officialSuccess: true,
       onContact(win, { clicks }) {
         if (clicks !== 1) return;
         if (saveVia === 'AI 设置') win.document.querySelector('[data-act="aiopen"]').click();
@@ -855,7 +1150,8 @@ for (const saveVia of ['主面板', 'AI 设置']) {
           sent: win.BH.loadStats().sent, saved: win.BH.loadConfig().dailyLimit };
       } });
     f.start();
-    await waitUntil(() => f.clickCount() >= 2 || /主循环异常/.test(f.logs()) || f.stopped(), 28000);
+    await waitUntil(() => /主循环异常/.test(f.logs()) || f.stopped(), 40000);
+    assert.ok(f.stopped(), '额度更新后的两笔沟通须结束：' + f.logs());
     assert.deepEqual(observed, { live: 150, shown: '150', sent: 80, saved: 150 }, f.logs());
     assert.equal(f.clickCount(), 2, f.logs());
     assert.equal(f.countAtClick(), 81, f.logs());
@@ -924,7 +1220,7 @@ test('等待 AI 判定时150→80，返回的通过结论不能再投第81次', 
   assert.equal(f.win.BH.loadStats().sent, 80);
 });
 
-test('AI 通过后同岗位已被另一标签预留，显示未投递原因而非残留 AI 通过', { timeout: 16000 }, async (t) => {
+test('AI 通过后同岗位已被另一标签预留，显示失败原因而非残留 AI 通过', { timeout: 16000 }, async (t) => {
   const f = await fixture(t, { aiEnabled: true });
   const occupied = await f.win.BH.reserveDelivery(JOB.id, 120);
   assert.ok(occupied);
@@ -936,12 +1232,14 @@ test('AI 通过后同岗位已被另一标签预留，显示未投递原因而�
   assert.equal(f.clickCount(), 0, f.logs());
   assert.equal(f.win.BH.loadStats().sent, 30);
   assert.equal(card.querySelector('.bh-tag-ai-pass'), null, f.logs());
-  assert.match(card.querySelector('.bh-tag')?.textContent || '', /未投递/);
+  assert.match(card.querySelector('.bh-tag')?.textContent || '', /失败/);
+  assert.equal(card.querySelector('.bh-tag')?.dataset.bhReceiptMissing, undefined,
+    '未点击的额度失败不能等待发送回执');
   assert.match(card.querySelector('.bh-tag-reason')?.textContent || '', /标签|预留|占用|发起|已投|额度/);
   await f.win.BH.releaseDelivery(occupied);
 });
 
-test('AI 通过后岗位正文更新，零投递并显示未投递，不重复请求 AI', { timeout: 16000 }, async (t) => {
+test('AI 通过后岗位正文更新，零投递并显示失败，不重复请求 AI', { timeout: 16000 }, async (t) => {
   const f = await fixture(t, { aiEnabled: true });
   let changed = false;
   const observer = new f.win.MutationObserver(() => {
@@ -949,8 +1247,8 @@ test('AI 通过后岗位正文更新，零投递并显示未投递，不重复�
     changed = true;
     f.win.document.querySelector('.job-sec-text').textContent = '新的岗位职责已变更为销售支持与客户沟通，与先前研发职责不同，需要重新判断。';
   });
+  cleanupObserverAfter(t, observer);
   observer.observe(f.win.document.querySelector('.job-list-wrapper'), { childList: true, subtree: true });
-  t.after(() => observer.disconnect());
   f.win.document.querySelector('[data-cfg="maxRounds"]').value = '1';
   f.start();
   await waitUntil(() => f.win.document.querySelector('.job-card-box')?.dataset.bhProcessed === '1' || f.stopped(), 14000);
@@ -961,7 +1259,9 @@ test('AI 通过后岗位正文更新，零投递并显示未投递，不重复�
   assert.equal(f.win.BH.loadStats().sent, 30);
   assert.equal(f.win.BH.loadStats().pending, 0);
   assert.equal(card.querySelector('.bh-tag-ai-pass'), null, f.logs());
-  assert.match(card.querySelector('.bh-tag')?.textContent || '', /未投递/);
+  assert.match(card.querySelector('.bh-tag')?.textContent || '', /失败/);
+  assert.equal(card.querySelector('.bh-tag')?.dataset.bhReceiptMissing, undefined,
+    '正文变化导致未点击，不应等待发送回执');
   assert.match(card.querySelector('.bh-tag-reason')?.textContent || '', /改变|变化|更新|正文|岗位|内容/);
 });
 

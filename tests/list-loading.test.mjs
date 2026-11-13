@@ -145,7 +145,7 @@ test('同岗位重新渲染恢复绿色完成及原因，复用为新岗位时�
   assert.equal(f.BH.getUnprocessedJobCards().length, 0);
   const restored = replacement.querySelector('.bh-tag-pass');
   assert.ok(restored, '已经完成的岗位重绘后仍应显示原终态');
-  assert.match(restored.textContent, /完成/);
+  assert.match(restored.textContent, /成功/);
   assert.equal(restored.querySelector('.bh-tag-reason').textContent, 'BOSS 已确认消息发送');
   assert.equal(replacement.dataset.bhProcessed, '1');
 
@@ -290,7 +290,7 @@ test('主循环连续三次未就绪后保留明确未投递标签，不静默�
   assert.equal(attempts, 3);
   const card = f.list.firstElementChild, tag = card.querySelector('.bh-tag-not-sent');
   assert.ok(tag, '重试耗尽仍要给用户可见的处理结果');
-  assert.match(tag.textContent, /未投递/);
+  assert.match(tag.textContent, /失败/);
   assert.match(tag.textContent, /连续.*未就绪|重试/);
   assert.equal(card.dataset.bhProcessed, '1');
   assert.equal(f.BH.getUnprocessedJobCards().length, 0);

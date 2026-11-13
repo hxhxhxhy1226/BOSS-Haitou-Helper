@@ -16,12 +16,31 @@ const html = `<section class="job-detail" data-jobid="${JOB.dataJobId}">
     <div class="job-sec-text">负责 STM32 控制器固件开发、FreeRTOS 驱动调试和设备通信协议开发，参与产品量产维护。</div></section>
   <div class="boss-info"><span class="active-time">今日活跃</span></div></section>`;
 
+function registerWindowCleanup(t, win, network) {
+  t.after(() => {
+    try {
+      if (win.BH) win.BH.state.stopFlag = true;
+    } finally {
+      try { win.close(); assert.equal(network.count, 0); }
+      finally { win = null; }
+    }
+  });
+}
+
+function registerTimerCleanup(t, timers) {
+  t.after(() => {
+    try { for (const timer of timers) clearTimeout(timer); }
+    finally { timers.length = 0; }
+  });
+}
+
 async function fixture(t, { detail = false } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, {
     url: detail ? `https://www.zhipin.com/job_detail/${JOB.jobId}.html` : 'https://www.zhipin.com/web/geek/job',
     runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: new VirtualConsole(),
   });
-  const win = dom.window, values = new Map();
+  const win = dom.window, values = new Map(), network = { count: 0 };
+  registerWindowCleanup(t, win, network);
   values.set('boss_helper_config_v1', { autoSend: false, aiEnabled: false, mustHave: [], mustNot: [],
     activeDays: 0, yearsMin: 0, eduMin: 0, dailyLimit: 10 });
   win.GM_getValue = (key, fallback) => values.has(key) ? structuredClone(values.get(key)) : fallback;
@@ -30,8 +49,7 @@ async function fixture(t, { detail = false } = {}) {
   win.GM_deleteValue = (key) => values.delete(key);
   win.GM_addStyle = () => {};
   win.unsafeWindow = win;
-  let network = 0;
-  const blocked = () => { network++; throw new Error('发送回归禁止连接真实服务'); };
+  const blocked = () => { network.count++; throw new Error('发送回归禁止连接真实服务'); };
   win.fetch = blocked;
   win.GM_xmlhttpRequest = blocked;
   const hidden = (el) => !!el.closest('[hidden], [aria-hidden="true"], [style*="display:none"], [style*="display: none"]');
@@ -46,7 +64,6 @@ async function fixture(t, { detail = false } = {}) {
   await delay(0);
   const BH = win.BH, doc = win.document;
   BH.state.config = { ...BH.loadConfig(), autoSend: true };
-  t.after(() => { BH.state.stopFlag = true; win.close(); assert.equal(network, 0); });
   const button = doc.querySelector('.op-btn-chat');
   button.addEventListener('click', (event) => event.preventDefault());
   const addNotice = (text, attrs = '') => {
@@ -176,6 +193,108 @@ test('成功弹窗暂时隐藏原详情时，不能因原详情不可见漏掉�
   assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
 });
 
+test('官方回执核验不重读职位正文，正文解析变慢也不阻止确认', async (t) => {
+  const f = await fixture(t), before = f.context();
+  const bodyText = f.doc.querySelector('.job-sec-text').firstChild;
+  const originalText = bodyText.nodeValue;
+  let reads = 0;
+  Object.defineProperty(bodyText, 'nodeValue', { configurable: true, get() { reads++; return originalText; } });
+  f.button.textContent = '继续沟通';
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+  assert.equal(reads, 0, '点击前已经验证过完整JD，回执阶段只需核对身份和官方提示');
+});
+
+test('详情全隐藏时深层选中态切B，混合面板更新也须永久作废A的回执', async (t) => {
+  const f = await fixture(t), card = mountSelectedCard(f);
+  card.classList.remove('active');
+  card.querySelector('.job-name').classList.add('selected');
+  const before = f.context();
+  assert.equal(before.identity.ok, true);
+  f.doc.querySelector('.job-detail').hidden = true;
+  const link = card.querySelector('.job-name');
+  link.href = '/job_detail/anotherHiddenJob.html';
+  f.doc.querySelector('.bh-log').insertAdjacentHTML('beforeend', '<p>面板统计更新</p>');
+  await delay(0);
+  assert.equal(before.invalidated, true, '没有可见详情时仍核对完整外层选中卡片的身份');
+  link.href = `/job_detail/${JOB.jobId}.html`;
+  f.doc.querySelector('.job-detail').hidden = false;
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before), null);
+});
+
+test('外部独立页头重建后发生内部ID冲突，正文根仍连接也不能认领回执', async (t) => {
+  const f = await fixture(t, { detail: true });
+  const header = f.doc.querySelector('.job-banner');
+  f.doc.body.prepend(header);
+  const before = f.context();
+  assert.equal(before.identity.ok, true, before.identity.reason);
+  assert.equal(before.identity.headerRoot, header);
+  const replacement = header.cloneNode(true);
+  replacement.dataset.jobid = 'anotherInternalJob';
+  header.replaceWith(replacement);
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(before.identity.root.isConnected, true);
+  assert.equal(f.BH.readOfficialContactResult(before), null);
+  assert.equal(before.invalidated, true);
+});
+
+test('多个可见详情中继续使用已匹配目标的范围，不把其他岗位回执按钮归给当前岗位', async (t) => {
+  const f = await fixture(t), before = f.context();
+  const other = f.doc.querySelector('.job-detail').cloneNode(true);
+  other.dataset.jobid = 'anotherInternalJob';
+  other.querySelector('.job-detail-link').href = '/job_detail/anotherPublicJob.html';
+  other.querySelector('.op-btn-chat').textContent = '继续沟通';
+  f.doc.body.append(other);
+  assert.equal(f.BH.readOfficialContactResult(before), null, '其他详情的按钮变化不能作为当前岗位成功');
+  f.button.textContent = '继续沟通';
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+});
+
+test('同岗位空详情副本缺少公开链接，仍以共同内部ID确认本次回执', async (t) => {
+  const f = await fixture(t), before = f.context();
+  const mirror = f.doc.querySelector('.job-detail').cloneNode(true);
+  mirror.querySelector('.job-detail-link').remove();
+  mirror.querySelector('.job-sec-text').textContent = '';
+  f.doc.body.append(mirror);
+  await delay(0);
+  assert.equal(f.BH.extractJobSnapshot(JOB).ok, true, '原完整详情和已核验岗位保持不变');
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before)?.status, 'confirmed');
+  assert.equal(before.invalidated, false, '缺少字段的同岗位镜像不能永久作废原回执');
+});
+
+test('只用公开ID选定目标时，两个详情的真实内部ID冲突仍阻止回执确认', async (t) => {
+  const f = await fixture(t);
+  const expected = { jobId: JOB.jobId, title: JOB.title, company: JOB.company };
+  const before = f.BH.captureOfficialContactContext(expected, f.button);
+  assert.equal(before.identity.ok, true);
+  const mirror = f.doc.querySelector('.job-detail').cloneNode(true);
+  mirror.dataset.jobid = 'anotherInternalJob';
+  mirror.querySelector('.job-sec-text').textContent = '';
+  f.doc.body.append(mirror);
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before), null, '共享公开ID不能掩盖详情内部ID矛盾');
+  assert.equal(before.invalidated, true);
+});
+
+test('同标题公司但没有强ID依据的多个独立详情，不能唯一认领本次回执', async (t) => {
+  const f = await fixture(t);
+  const root = f.doc.querySelector('.job-detail');
+  root.removeAttribute('data-jobid');
+  root.querySelector('.job-detail-link').remove();
+  const expected = { title: JOB.title, company: JOB.company };
+  const before = f.BH.captureOfficialContactContext(expected, f.button);
+  assert.equal(before.identity.ok, true);
+  const mirror = root.cloneNode(true);
+  mirror.querySelector('.job-sec-text').textContent = '';
+  f.doc.body.append(mirror);
+  f.addNotice('已向BOSS发送消息');
+  assert.equal(f.BH.readOfficialContactResult(before), null);
+  assert.equal(before.invalidated, true);
+});
+
 test('旧自定义成功弹窗的消息预览或按钮更新，不能冒充本次新回执', async (t) => {
   const f = await fixture(t), dialog = customSuccessDialog(f);
   const before = f.context();
@@ -210,14 +329,15 @@ test('旧成功弹窗只重建标题节点，不能制造本次新回执', async
 
 test('按钮先变继续沟通、成功框晚一百毫秒挂载，仍等待并关闭该框', { timeout: 8000 }, async (t) => {
   const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
-  let dialog, timer, closed = 0;
-  t.after(() => clearTimeout(timer));
+  let dialog, closed = 0;
+  const timers = [];
+  registerTimerCleanup(t, timers);
   f.button.addEventListener('click', () => {
     f.button.textContent = '继续沟通';
-    timer = setTimeout(() => {
+    timers.push(setTimeout(() => {
       dialog = customSuccessDialog(f);
       dialog.querySelector('.cancel-btn').addEventListener('click', () => { closed++; dialog.remove(); });
-    }, 100);
+    }, 100));
   });
   const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
   assert.equal(result.status, 'confirmed');
@@ -248,6 +368,30 @@ test('留在此页触发同框重建时，继续关闭新框并等到它消失',
   assert.equal(replacement.isConnected, false);
   assert.equal(f.doc.querySelector('.greet-dialog'), null);
   assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('慢回执扫描跨过关框截止时间，已消失的成功框仍完成稳定确认', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let dialog, clicks = 0, scanCost = 0, slowScans = 0;
+  const realNow = f.win.Date.now;
+  f.win.Date.now = () => realNow() + scanCost;
+  const querySelectorAll = f.doc.querySelectorAll;
+  f.doc.querySelectorAll = function (selector) {
+    if (dialog?.isConnected === false && selector.includes('.boss-dialog__wrapper')) {
+      scanCost += 1300;
+      slowScans++;
+    }
+    return querySelectorAll.call(this, selector);
+  };
+  f.button.addEventListener('click', () => { clicks++; dialog = f.addNotice('已向BOSS发送消息'); });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.dialogClosed, true, '慢查询消耗截止预算后仍完成已经开始的200ms隐藏稳定核验');
+  assert.ok(slowScans >= 2, '模拟关框后的完整通知扫描超过原1200ms期限');
+  assert.equal(dialog.isConnected, false);
+  assert.equal(clicks, 1);
+  assert.equal(f.BH.state.stopFlag, false);
+  assert.equal(f.BH.loadStats().sent, 1);
 });
 
 for (const failure of ['no-op', 'throw']) {
@@ -299,8 +443,9 @@ test('成功框的留在此页与关闭按钮均失效时停止后续处理，�
 test('官方回执延迟超过四秒才出现，默认等待仍确认招呼已发送', { timeout: 8000 }, async (t) => {
   const f = await fixture(t), before = f.context();
   const started = Date.now();
-  const timer = setTimeout(() => f.addNotice('招呼已发送'), 4300);
-  t.after(() => clearTimeout(timer));
+  const timers = [];
+  registerTimerCleanup(t, timers);
+  timers.push(setTimeout(() => f.addNotice('招呼已发送'), 4300));
   const result = await f.BH.waitForOfficialContactResult(before);
   assert.equal(result.status, 'confirmed');
   assert.match(result.reason, /招呼已发送/);
@@ -358,7 +503,7 @@ test('列表 URL 不变但选中职位已切换时，新弹窗不能归给原职
   assert.equal(f.BH.readOfficialContactResult(before), null);
 });
 
-test('独立详情实际流程：无官方回执时显示待确认、保留占额且不会注入旧话术', { timeout: 8000 }, async (t) => {
+test('独立详情实际流程：无官方回执显示失败原因、保留占额且不会注入旧话术', { timeout: 8000 }, async (t) => {
   const f = await fixture(t, { detail: true });
   const input = f.doc.createElement('textarea'); input.id = 'chat-input'; input.value = '用户正在编辑的消息'; f.doc.body.append(input);
   let clicks = 0;
@@ -367,7 +512,8 @@ test('独立详情实际流程：无官方回执时显示待确认、保留占�
   assert.equal(clicks, 1);
   assert.equal(f.BH.loadStats().sent, 1);
   assert.equal(f.BH.loadStats().pending, 0);
-  assert.match(f.logs(), /已发起沟通，待确认/);
+  assert.match(f.logs(), /失败.*未收到.*官方.*回执/);
+  assert.doesNotMatch(f.logs(), /待确认/);
   assert.doesNotMatch(f.logs(), /官方已确认沟通|已发送|已招呼/);
   assert.equal(input.value, '用户正在编辑的消息');
   assert.equal(await f.BH.reserveDelivery(JOB.jobId, 10), false, '未确认也不能重复发起同一职位');
@@ -378,7 +524,7 @@ test('独立详情实际流程：官方确认后才记成功，保持一次占�
   f.button.addEventListener('click', () => { f.addNotice('已向BOSS发送消息'); f.BH.state.stopFlag = true; });
   assert.equal(await f.BH.autoChatOnDetail(), true);
   assert.match(f.logs(), /官方已确认沟通/);
-  assert.doesNotMatch(f.logs(), /已发起沟通，待确认/);
+  assert.doesNotMatch(f.logs(), /失败|待确认/);
   assert.equal(f.BH.loadStats().sent, 1);
 });
 

@@ -200,7 +200,7 @@ try {
   await until(() => evaluate(page, 'fixtureClicks===1'), 20000);
   await until(() => evaluate(page, "document.querySelector('.bh-log').textContent.includes('官方已确认')"));
   check(await evaluate(page, 'fixtureClicks===1 && fixtureReplacements>1 && fixtureClickedGeneration===fixtureReplacements && fixtureReplaceTimer===null'), '同岗位按钮持续重建后只激活最新按钮一次，并获得官方确认');
-  check(await evaluate(page, "(()=>{const tag=document.querySelector('.job-card-box .bh-tag-pass');return !!tag&&tag.textContent.includes('完成')&&getComputedStyle(tag).backgroundColor.includes('52, 199, 89')&&!document.querySelector('.job-card-box .bh-tag-pending');})()"), '拆分成功标题和长预览在背景详情隐藏时仍被识别，卡片显示绿色完成');
+  check(await evaluate(page, "(()=>{const tag=document.querySelector('.job-card-box .bh-tag-pass');return !!tag&&tag.textContent.includes('成功')&&getComputedStyle(tag).backgroundColor.includes('52, 199, 89')&&!document.querySelector('.job-card-box .bh-tag-pending');})()"), '拆分成功标题和长预览在背景详情隐藏时仍被识别，卡片显示绿色成功');
   check(await evaluate(page, "fixtureDialogClosed && fixtureStayClicks===1 && fixtureContinueClicks===0 && !document.querySelector('.contact-completed-overlay') && !document.querySelector('#detail-host').hasAttribute('aria-hidden')"), '只点击留在此页并等待成功框异步关闭，不进入继续沟通');
   await until(() => evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).some(x=>x?.kind==='sent'&&x.status==='dispatched'&&x.clickPending===false&&x.clickedAt>0))"));
   const sent = await evaluate(workerSession, "chrome.storage.local.get(null).then(v=>Object.values(v).filter(x=>x?.kind==='sent'&&x.status==='dispatched').length)");

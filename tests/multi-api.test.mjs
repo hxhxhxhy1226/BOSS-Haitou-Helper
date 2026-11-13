@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { SCRIPT } from './script-target.mjs';
+import { reportedDriverInternship, reportedRTOSJob } from './reported-jobs.mjs';
 
 const code = fs.readFileSync(SCRIPT, 'utf8');
 const clone = (value) => value == null ? value : structuredClone(value);
@@ -266,6 +267,103 @@ test('AI 缓存不受运行中服务切换影响，修改备用模型则失效',
   assert.equal(changed.cached, false);
   assert.equal(f.postURLs().at(-1), BACKUP);
   assert.equal(f.requests.at(-1).body.model, 'new-backup-model');
+});
+
+// These local responses deliberately exercise request-policy delivery and result
+// handling. They are not evidence that a live model made the expected judgment.
+const OPPORTUNITY_PROFILE = '合成候选人，电子类专业。熟悉 C/C++、STM32 外设驱动、UART/SPI/I2C/CAN 通信，做过 FreeRTOS 多任务、队列和同步开发，以及 FOC 电机实时控制项目。目标是嵌入式和车载驱动研发，愿意尝试有相关基础的实习与校招；未提及的技术留待面试确认。';
+const OPPORTUNITY_CASES = [
+  {
+    id: 'intern-linux-familiar', ...reportedDriverInternship,
+    match: true, reason: '已有外设与RTOS基础，Linux熟悉程度待面试确认',
+  },
+  {
+    id: 'rtos-mixed-driver', ...reportedRTOSJob,
+    match: true, reason: '有FreeRTOS开发经验，其他平台细节待面试确认',
+  },
+  {
+    id: 'rtos-without-linux', title: '实时系统固件开发',
+    jd: '岗位职责：负责 FreeRTOS 多任务应用、消息队列和同步机制开发，完成 STM32 外设驱动、DMA 通信与电机控制固件调试。\n任职要求：熟悉 C/C++，具有实时系统开发基础，了解 UART、SPI、I2C 或 CAN 接口。',
+    match: true, reason: 'FreeRTOS任务与STM32驱动项目相关', noLinux: true,
+  },
+  {
+    id: 'basic-linux-debug', title: '嵌入式软件助理工程师',
+    jd: '负责设备接口联调、日志分析和通信问题排查，参与 C 语言驱动模块维护。熟悉 Linux 常用命令、串口调试和 SPI/I2C 接口，有 MCU 或 RTOS 项目经验者优先。',
+    match: true, reason: '已有驱动通信基础，可尝试基础Linux调试工作',
+  },
+  {
+    id: 'explicit-expert-bsp', title: '高级Linux BSP专家',
+    jd: '唯一核心职责为 Linux 内核与 BSP 平台架构。必须以专家水平独立承担内核裁剪、PCIe DMA 驱动和复杂启动故障定位，入职即独立负责平台，无基础岗位或可选固件方向。',
+    profile: OPPORTUNITY_PROFILE + 'Linux 目前仅了解基本命令，明确尚不熟悉内核和 BSP；暂无平台架构能力。',
+    match: false, reason: '要求独立内核BSP专家，画像明确仅懂基本命令',
+  },
+  {
+    id: 'unrelated-sales', title: '课程销售顾问',
+    jd: '主要负责课程电话销售、客户邀约与招生转化，无软件开发职责。',
+    match: false, reason: '主要工作为招生销售，画像目标为嵌入式研发', noLinux: true,
+  },
+];
+
+for (const custom of [false, true]) {
+  for (const sample of OPPORTUNITY_CASES) {
+    test(`投递机会提示实际送达主备API：${sample.id}（${custom ? '旧严格自定义模板' : '默认模板'}）`, async (t) => {
+      const profile = sample.profile || OPPORTUNITY_PROFILE;
+      const oldTemplate = '自定义：所有技能均已验证才能通过，未列相关平台经历就拒绝。只输出JSON。';
+      const f = await fixture(t, { cfg: { aiUserPortrait: profile, aiRejectShortTerm: false, aiCacheEnabled: false,
+        aiMaxJDChars: 12000, aiPromptTemplate: custom ? oldTemplate : '', mustHave: [], mustNot: [] },
+        gm: (o) => o.url === PRIMARY ? response(o, 503, { error: { message: 'fixture primary unavailable' } })
+          : response(o, 200, { choices: [{ message: { content: JSON.stringify({ match: sample.match, score: sample.match ? 85 : 20, reason: sample.reason }) } }] }) });
+      const result = await f.BH.aiScreen({ jobId: sample.id, title: sample.title, company: '合成测试公司', jd: sample.jd });
+      assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
+      assert.equal(result.ok, true);
+      assert.equal(result.match, sample.match, 'The helper preserves the mocked model response; this does not assess model accuracy');
+      assert.equal(result.reason, sample.reason);
+      assert.equal(result.endpointId, 'backup');
+      const messages = f.requests.map((request) => request.body.messages);
+      assert.deepEqual(messages[0], messages[1], 'Failover must preserve the full portrait, JD and requested policy');
+      for (const sent of messages) {
+        const system = sent.find((item) => item.role === 'system').content;
+        const user = sent.find((item) => item.role === 'user').content;
+        assert.ok(user.includes(profile), 'The entire actual profile must reach each API');
+        assert.ok(user.includes(sample.jd), 'The entire current fixture JD must reach each API');
+        assert.match(system, /任务是投递机会筛选，不是完全胜任评审/);
+        assert.match(system, /未知技能属于待面试确认/);
+        assert.match(system, /拒绝 reason 必须简短引用这两侧依据/);
+        assert.match(system, /画像写明 FreeRTOS 开发.*应承认已有 RTOS 开发经验/);
+        assert.match(system, /JD 的“了解\/熟悉\/掌握\/精通\/深入\/必须独立”保持原有强度/);
+        assert.doesNotMatch(system, /或岗位以画像未验证的专业技术为必备核心且没有匹配职责/);
+        assert.match(user, /本次是投递机会筛选/);
+        assert.match(user, /未知技能留待面试确认，不以完全胜任为前提/);
+        const sentJD = user.slice(user.indexOf('JD 正文：\n') + 'JD 正文：\n'.length);
+        if (sample.noLinux) assert.doesNotMatch(sentJD, /Linux/i, 'Policy examples must not become fabricated requirements in the actual JD');
+        if (custom) {
+          assert.ok(system.startsWith(oldTemplate));
+          assert.match(system, /若旧的自定义模板要求.*以本次基础相关优先尝试的投递偏好为准/);
+        }
+      }
+    });
+  }
+}
+
+test('v119严格Linux拒绝缓存升级后重新请求，两份API完整接收当前无Linux的RTOS岗位', async (t) => {
+  const f = await fixture(t, { cfg: { aiUserPortrait: OPPORTUNITY_PROFILE, aiRejectShortTerm: false, aiCacheEnabled: true },
+    gm: (o) => o.url === PRIMARY ? response(o, 503, {}) : response(o, 200, good()) });
+  const sample = OPPORTUNITY_CASES.find((item) => item.noLinux && item.id.startsWith('rtos'));
+  const target = { jobId: 'legacy-strict-refusal', title: sample.title, company: '合成测试公司', jd: sample.jd };
+  f.BH.setAICache(target.jobId, { match: false, score: 0, reason: '旧严格规则：缺乏Linux与RTOS经验' }, target);
+  const cache = clone(f.store.get('boss_helper_ai_cache_v1'));
+  cache[target.jobId].pf = cache[target.jobId].pf.replace(/^v\d+\|/, 'v119|');
+  f.store.set('boss_helper_ai_cache_v1', cache);
+  f.win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(cache));
+  assert.match(f.BH.aiCacheFingerprint(), /^v112\|/);
+  const result = await f.BH.aiScreen(target);
+  assert.equal(result.ok, true);
+  assert.equal(result.match, true);
+  assert.equal(result.cached, false);
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
+  assert.ok(f.requests.every((request) => request.body.messages[1].content.includes(sample.jd)));
+  assert.equal((await f.BH.aiScreen(target)).cached, true, 'A current-policy result can be reused normally');
+  assert.deepEqual(f.postURLs(), [PRIMARY, BACKUP]);
 });
 
 test('升级后不沿用 v21 的旧拒绝缓存，重新取得当前 AI 结论', async (t) => {

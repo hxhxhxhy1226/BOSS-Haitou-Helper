@@ -218,6 +218,96 @@ test('超过 2500 字的可信正文完整采集，截断交给后续 AI 输入�
   assert.ok(snapshot.description.includes(lines.at(-1)));
 });
 
+test('正文首段位于任职要求标题之前时，首段职责与后续要求都完整采集', async (t) => {
+  const first = '首段职责：本岗位必须掌握 Linux 内核和设备树开发，负责嵌入式系统移植。';
+  const last = '任职条件：本科及以上学历，具有 C 语言与驱动调试经验。';
+  const markup = `<section class="job-detail" data-jobid="${B.dataJobId}">${header(B)}
+    <p>${first}</p><h3>任职要求</h3><ul><li>${last}</li></ul></section>`;
+  const f = await fixture(t, mountWithCard(markup, B));
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.ok(snapshot.description.includes(first), '不能因后续标题被识别就漏掉标题前的真实职责首段：' + snapshot.description);
+  assert.ok(snapshot.description.includes(last));
+  assert.ok(snapshot.description.indexOf(first) < snapshot.description.indexOf(last), '保留原岗位段落顺序');
+});
+
+test('语义正文之后的独立 article 职责也要采集，不能因首块非空而省略后半岗位要求', async (t) => {
+  const first = '第一块职责：使用 STM32 开发控制器固件，并实现 CAN 通信。';
+  const last = '第二块职责：必须负责 Linux 系统移植和设备驱动开发。';
+  const markup = `<section class="job-detail" data-jobid="${B.dataJobId}">${header(B)}
+    <div class="job-sec-text"><p>${first}</p></div><article><p>${last}</p></article>
+    <section class="company-intro"><p>公司介绍噪音：主营培训招生和外包服务。</p></section>
+    <aside class="job-recommend"><p>推荐岗位噪音：销售兼职。</p></aside></section>`;
+  const f = await fixture(t, mountWithCard(markup, B));
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.ok(snapshot.description.includes(first));
+  assert.ok(snapshot.description.includes(last), '已有 .job-sec-text 不能挡住同一职位的其他正文：' + snapshot.description);
+  assert.equal(snapshot.description.split(first).length - 1, 1);
+  assert.equal(snapshot.description.split(last).length - 1, 1);
+  assert.doesNotMatch(snapshot.description, /公司介绍噪音|推荐岗位噪音|培训招生|销售兼职/);
+});
+
+test('CSS 高度折叠的岗位正文仍读取首段和末段，不以视觉裁切代替完整DOM正文', async (t) => {
+  const first = '折叠首段：负责 MCU 固件研发。';
+  const last = '折叠末段：必须独立完成 Linux BSP 和设备树开发。';
+  const markup = detail(B, `<p>${first}</p><p>${last}</p>`)
+    .replace('class="job-sec-text"', 'class="job-sec-text" style="max-height:20px;overflow:hidden"');
+  const f = await fixture(t, mountWithCard(markup, B));
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.ok(snapshot.description.includes(first));
+  assert.ok(snapshot.description.includes(last));
+});
+
+test('岗位正文上半部分已滚出视口时仍完整读取，不漏首段必备要求', async (t) => {
+  const first = '视口外首段：必须熟悉 Linux 内核开发。';
+  const last = '末段：参与固件测试和技术文档维护。';
+  const f = await fixture(t, mountWithCard(detail(B, `<p>${first}</p><p>${last}</p>`), B));
+  const root = f.doc.querySelector('.job-detail');
+  const originalRect = f.win.Element.prototype.getBoundingClientRect;
+  f.win.Element.prototype.getBoundingClientRect = function () {
+    const rect = originalRect.call(this);
+    return this === root || root.contains(this) ? { ...rect, y: -1200, top: -1200, bottom: -900 } : rect;
+  };
+  const snapshot = f.BH.extractJobSnapshot(f.expected());
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.ok(snapshot.description.includes(first));
+  assert.ok(snapshot.description.includes(last));
+});
+
+test('详情缺公司和薪资时使用同次确认卡片的字段，不借其他列表卡字段', async (t) => {
+  const markup = detail(B, NEW_JD)
+    .replace(`<a class="company-name" href="/gongsi/test.html">${B.company}</a>`, '')
+    .replace('<span class="salary">8-13K</span>', '');
+  const f = await fixture(t, mountWithCard(markup, B)
+    + `<ul>${card(A, '<span class="job-salary">99-120K</span>')}</ul>`);
+  const expected = f.expected();
+  const snapshot = f.BH.extractJobSnapshot(expected);
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  assert.equal(snapshot.company, '');
+  assert.equal(snapshot.salary, '');
+  const job = f.BH.jobFromSnapshot(snapshot, expected);
+  assert.equal(job.company, B.company);
+  assert.equal(job.salary, '8-13K');
+  assert.notEqual(job.company, A.company);
+  assert.notEqual(job.salary, '99-120K');
+});
+
+test('详情及当前卡片字段均缺失时，不借其他岗位的公司与薪资补全', async (t) => {
+  const markup = detail(B, NEW_JD)
+    .replace(`<a class="company-name" href="/gongsi/test.html">${B.company}</a>`, '')
+    .replace('<span class="salary">8-13K</span>', '');
+  const f = await fixture(t, `<ul class="job-list-wrapper">${card(B, '', '')}${card(A, '<span class="job-salary">99-120K</span>')}</ul>
+    <main id="detail-host">${markup}</main>`);
+  const expected = f.expected();
+  const snapshot = f.BH.extractJobSnapshot(expected);
+  assert.equal(snapshot.ok, true, snapshot.reason);
+  const job = f.BH.jobFromSnapshot(snapshot, expected);
+  assert.equal(job.company, '');
+  assert.equal(job.salary, '');
+});
+
 test('没有可信详情容器时返回失败，不从整页或列表卡片拼凑 JD', async (t) => {
   const f = await fixture(t, `<h1>嵌入式软件工程师</h1><div>职位描述：广告中的培训信息</div><ul>${card()}</ul>`);
   assert.equal(f.BH.getDetailRoot(), null);

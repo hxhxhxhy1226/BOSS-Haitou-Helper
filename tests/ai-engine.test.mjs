@@ -1199,14 +1199,14 @@ section('25. AI 判断标准：薪资取自「规则设置」，学历/年限只
   ok('活跃度仍取「规则设置」的值', crit[3].key === 'activeDays' && crit[3].text === '7 天内活跃', crit[3] && crit[3].text);
 
   // 25b. v1.0.20：画像写明条件时才按画像（单一来源 = profileEduExpPolicy）
-  const peOff = BH.profileEduExpPolicy(cfg);
+  const peOff = BH.profileEduExpPolicy({ ...cfg, aiIgnoreEduExp: false });
   ok('画像没写学历/经验条件 → 两项都不作为判断依据',
      peOff.hasEdu === false && peOff.hasExp === false && peOff.text === '不作为判断依据', JSON.stringify(peOff));
-  const peOn = BH.profileEduExpPolicy({ ...cfg, aiUserPortrait: '只投硕士以下，工作经历3年，熟悉STM32' });
+  const peOn = BH.profileEduExpPolicy({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '只投硕士以下，工作经历3年，熟悉STM32' });
   ok('画像写明「只投硕士以下，工作经历3年」→ 按求职画像判断',
      peOn.hasEdu === true && peOn.hasExp === true
      && peOn.edu[0] === '只投硕士以下' && peOn.exp[0] === '工作经历3年', JSON.stringify(peOn));
-  const critOn = BH.aiSoftCriteria({ ...cfg, aiUserPortrait: '只投硕士以下，工作经历3年' });
+  const critOn = BH.aiSoftCriteria({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '只投硕士以下，工作经历3年' });
   ok('画像有条件时 criteria 显示"按求职画像"',
      critOn[0].text === '按求职画像' && critOn[1].text === '按求职画像'
      && /只投硕士以下/.test(critOn[1].hint) && /工作经历3年/.test(critOn[0].hint),
@@ -1538,7 +1538,9 @@ section('29. 误杀修正：明确排斥封闭集合 + 计薪方式不算短期�
      !/按天计薪|日结/.test(listLine), listLine);
   ok('短期开：按天计薪只出现在"不是判据"的说明里',
      /计薪方式（按天计薪/.test(noteLine) && /本身不是/.test(noteLine) && /短期岗位的判据/.test(noteLine), noteLine);
-  ok('短期开：明写只有「短期/实习/项目制/兼职/劳务派遣」才算', /只有明确写了/.test(pOn));
+  ok('短期开：只认当前岗位短期性质，普通实习与校招不算',
+     /只有当前岗位明确属于「短期实习」「项目制」「兼职」「劳务派遣」才算/.test(pOn)
+     && /普通实习、长期实习、校招本身不算/.test(pOn));
 
   // 29c. 按天薪资不再折算成月薪去卡薪资下限
   setCfg({ ...base, salaryMin: 16 });
@@ -1721,7 +1723,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v112（旧严格技能拒绝不得沿用）', /^v112\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v113（旧未复核的拒绝不得沿用）', /^v113\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2637,16 +2639,16 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
   // 48a. profileEduExpPolicy：身份描述不算条件，筛选条件才算
   const pe = BH.profileEduExpPolicy(cfg);
   ok('画像只有身份描述（应届生/有FOC项目经验）→ 学历经验都不是判断依据',
-     pe.hasEdu === false && pe.hasExp === false && pe.text === '不作为判断依据', JSON.stringify(pe));
-  const pe2 = BH.profileEduExpPolicy({ ...cfg, aiUserPortrait: '只投硕士以下，工作经历3年' });
+     pe.hasEdu === false && pe.hasExp === false && /不作为判断依据/.test(pe.text), JSON.stringify(pe));
+  const pe2 = BH.profileEduExpPolicy({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '只投硕士以下，工作经历3年' });
   ok('画像写明「只投硕士以下，工作经历3年」→ 两条都成为唯一依据',
      pe2.hasEdu === true && pe2.hasExp === true
      && pe2.edu[0] === '只投硕士以下' && pe2.exp[0] === '工作经历3年', JSON.stringify(pe2));
-  const pe3 = BH.profileEduExpPolicy({ ...cfg, aiUserPortrait: '本科及以上学历，3年以上经验' });
+  const pe3 = BH.profileEduExpPolicy({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '本科及以上学历，3年以上经验' });
   ok('「本科及以上学历，3年以上经验」→ 同样识别为条件', pe3.hasEdu === true && pe3.hasExp === true, JSON.stringify(pe3));
-  const pe4 = BH.profileEduExpPolicy({ ...cfg, aiUserPortrait: '5年嵌入式软件工程师，精通 STM32' });
+  const pe4 = BH.profileEduExpPolicy({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '5年嵌入式软件工程师，精通 STM32' });
   ok('「5年嵌入式软件工程师」是身份不是条件 → 不触发', pe4.hasExp === false, JSON.stringify(pe4));
-  const pe5 = BH.profileEduExpPolicy({ ...cfg, aiUserPortrait: '学历不限，经验不限' });
+  const pe5 = BH.profileEduExpPolicy({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '学历不限，经验不限' });
   ok('「学历不限，经验不限」→ 明确无要求，不触发', pe5.hasEdu === false && pe5.hasExp === false, JSON.stringify(pe5));
 
   // 48b. 用户截图场景：即使「规则设置」设了 年限3/学历本科，prompt 也不拿它们说事
@@ -2671,7 +2673,7 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
   ok('JD 正文原样送入（方向判断不受影响）', p.includes('任职要求：3年以上嵌入式开发经验'));
 
   // 48c. 画像写明条件时：封闭条件块 + 字段行才出现
-  setCfg({ ...cfg, aiUserPortrait: '只投硕士以下，工作经历3年' });
+  setCfg({ ...cfg, aiIgnoreEduExp: false, aiUserPortrait: '只投硕士以下，工作经历3年' });
   const p2 = BH.buildAIPrompt(job);
   const blk = p2.indexOf('【画像中的学历/经验条件（唯一可用的学历与经验判断依据）】');
   ok('出现「画像中的学历/经验条件」封闭块，且只列画像写明的两条',
@@ -2701,8 +2703,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v112（旧严格拒绝结论自动失效）',
-     /^v112\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v113（旧未复核的拒绝结论自动失效）',
+     /^v113\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 

@@ -237,15 +237,26 @@ try {
   await send('Page.reload', { ignoreCache: true }, page);
   await until(() => evaluate(page, "document.querySelector('[data-cfg=dailyLimit]')?.value==='1'"));
   check(await evaluate(page, 'fixtureClicks===0'), '刷新恢复已保存配置，页面不会自动重新投递');
-  await evaluate(page, `(()=>{document.querySelector('[data-act=aiopen]').click();const f=k=>document.querySelector('#bh-ai-modal [data-cfg="'+k+'"]');f('aiBaseUrl').value='https://api.fixture.example/v1';f('aiApiKey').value='fixture-only-key';f('aiModel').value='fixture-model';document.querySelector('#bh-ai-modal [data-act=aisave]').click();})()`);
+  await evaluate(page, "document.querySelector('[data-act=aiopen]').click()");
+  check(await evaluate(page, "document.querySelector('#bh-ai-modal [data-cfg=aiIgnoreEduExp]').checked"), '忽略年限和学历要求在真实扩展设置中默认开启');
+  await evaluate(page, `(()=>{const f=k=>document.querySelector('#bh-ai-modal [data-cfg="'+k+'"]');f('aiBaseUrl').value='https://api.fixture.example/v1';f('aiApiKey').value='fixture-only-key';f('aiModel').value='fixture-model';for(const k of ['aiIgnoreEduExp','aiRejectShortTerm','aiStrictFacts']) f(k).checked=false;document.querySelector('#bh-ai-modal [data-act=aisave]').click();})()`);
   await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.aiApiKey==='fixture-only-key')"));
   await until(() => evaluate(page, "document.querySelector('.bh-log').textContent.includes('AI 设置已保存')"));
+  check(await evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>['aiIgnoreEduExp','aiRejectShortTerm','aiStrictFacts'].every(k=>v.boss_helper_config_v1[k]===false))"), '三个策略开关保存到真实扩展存储');
   await evaluate(page, `(()=>{document.querySelector('#bh-ai-modal [data-act=aiendpointadd]').click();const card=document.querySelector('#bh-ai-endpoint-list [data-endpoint-id]');for(const [key,value] of Object.entries({name:'备用测试',baseUrl:'https://backup.fixture.example/v1',apiKey:'fixture-backup-key',model:'backup-model'})){card.querySelector('[data-endpoint-field="'+key+'"]').value=value;}document.querySelector('#bh-ai-modal [data-act=aisave]').click();})()`);
   await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1?.aiEndpoints?.[0]?.apiKey==='fixture-backup-key')"));
   await until(() => evaluate(page, "document.querySelector('#bh-ai-endpoint-list [data-endpoint-field=baseUrl]')?.value.endsWith('/chat/completions')"));
   await evaluate(page, "document.querySelector('#bh-ai-modal [data-act=aiclose]').click()");
   check(await evaluate(page, "!document.querySelector('#bh-ai-confirm') && !document.querySelector('#bh-ai-modal')"), '真实扩展存储保存备用 API 后关闭，不误报未保存');
   await evaluate(page, "document.querySelector('[data-act=aiopen]').click()");
+  check(await evaluate(page, "['aiIgnoreEduExp','aiRejectShortTerm','aiStrictFacts'].every(k=>document.querySelector('#bh-ai-modal [data-cfg='+k+']').checked===false)"), '重新打开设置后三个策略开关保留关闭状态');
+  await evaluate(page, `(()=>{const f=k=>document.querySelector('#bh-ai-modal [data-cfg="'+k+'"]');f('aiIgnoreEduExp').checked=true;f('aiStrictFacts').checked=true;document.querySelector('#bh-ai-modal [data-act=aisave]').click();})()`);
+  await until(() => evaluate(workerSession, "chrome.storage.local.get('boss_helper_config_v1').then(v=>v.boss_helper_config_v1.aiIgnoreEduExp===true && v.boss_helper_config_v1.aiStrictFacts===true)"));
+  await until(() => evaluate(page, "document.querySelector('#bh-ai-modal [data-cfg=aiIgnoreEduExp]').checked && document.querySelector('#bh-ai-modal [data-cfg=aiStrictFacts]').checked"));
+  await evaluate(page, "document.querySelector('#bh-ai-modal [data-cfg=aiIgnoreEduExp]').closest('.bh-ai-group').scrollIntoView({block:'start'})");
+  await delay(350); // Capture after the modal and toggle transitions finish.
+  const policyScreenshot = await send('Page.captureScreenshot', { format: 'png' }, page);
+  await fs.writeFile(path.join(output, 'edge-ai-policy-1.1.13.png'), Buffer.from(policyScreenshot.data, 'base64'));
   for (let attempt = 0; attempt < 2; attempt++) {
     await evaluate(page, "document.querySelector('#bh-ai-modal [data-act=aimodels]').click()");
     await until(() => evaluate(page, "document.querySelector('#bh-detail-modal [data-role=body]')?.value.includes('尚未授权')"));

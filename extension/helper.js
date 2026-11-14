@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.12 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.13 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -1340,6 +1340,8 @@
     //               技术适配按投递机会判断；未知技能留待面试确认，不自动当成缺口。
     // false        → 恢复保守风控：允许模型基于推测判 false（这是 1.0.10 及之前的行为）
     aiStrictFacts: true,
+    // 忽略招聘学历与工作年限门槛；技术能力和真实项目仍须比较。
+    aiIgnoreEduExp: true,
   };
 
   const CONFIG_KEY = 'boss_helper_config_v1';
@@ -1406,7 +1408,7 @@
     numeric('aiTemperature', 0, 2);
     numeric('aiMaxRetries', 0, 3, true);
     numeric('aiCacheDays', 1, 365, true);
-    for (const key of ['autoSend', 'autoScroll', 'aiEnabled', 'aiPrimaryEnabled', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts']) {
+    for (const key of ['autoSend', 'autoScroll', 'aiEnabled', 'aiPrimaryEnabled', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts', 'aiIgnoreEduExp']) {
       if (typeof cfg[key] !== 'boolean') cfg[key] = DEFAULT_CONFIG[key];
     }
     if (!['local', 'skip', 'pause'].includes(cfg.aiFallback)) cfg.aiFallback = DEFAULT_CONFIG.aiFallback;
@@ -3913,10 +3915,10 @@
         `autoSend: ${cfg.autoSend !== false ? '开' : '关'}`,
         '',
         '=== AI 筛选 ===',
-        `AI 模式: ${cfg.aiEnabled ? '开启（排除词按上下文判断；学历/年限仅按求职画像；活跃度本地硬卡）' : '关闭（本地规则，技术别名与明确上下文匹配）'}`,
+        `AI 模式: ${cfg.aiEnabled ? '开启（排除词按上下文判断；学历/年限遵循忽略开关；活跃度本地硬卡）' : '关闭（本地规则，技术别名与明确上下文匹配）'}`,
         `今日 AI 调用尝试: ${stats.aiCalls || 0}（不限次数）`,
         `AI 缓存命中: ${stats.aiHits || 0} 次（缓存条目 ${aiCacheSize()} 条，有效期 ${cfg.aiCacheDays || 7} 天）`,
-        `当前生效筛选模式: ${cfg.aiEnabled ? 'aiSoftCriteria=true（必含词 + 排除词 + 薪资 为 AI 语义判断；学历/年限仅按求职画像；活跃度本地硬卡）' : 'aiSoftCriteria=false（本地硬卡：必含词 + 排除词 + 年限/学历/薪资/活跃度）'}`,
+        `当前生效筛选模式: ${cfg.aiEnabled ? 'aiSoftCriteria=true（必含词 + 排除词 + 薪资 为 AI 语义判断；学历/年限遵循忽略开关；活跃度本地硬卡）' : 'aiSoftCriteria=false（本地硬卡：必含词 + 排除词 + 年限/学历/薪资/活跃度）'}`,
         `AI 判断标准: ${describeAISoftCriteria(cfg)}`,
         `画像学历/经验条件: ${profileEduExpPolicy(cfg).text}`,
         `短期岗位过滤: ${shortTermPolicy(cfg).text}（开关在 AI 设置 →「限制与策略」）`,
@@ -3959,7 +3961,7 @@
         refreshBlindModeButton();
         if (state.skipKeywordCheck) {
           addLog((state.config || loadConfig()).aiEnabled
-            ? '盲投已开启：不看必含/排除词；薪资 交给 AI 判断；学历/年限仅按「求职画像」里写明的条件判断，活跃度仍本地硬卡'
+            ? '盲投已开启：不看必含/排除词；薪资 交给 AI 判断；学历/年限遵循「忽略年限和学历要求」开关，活跃度仍本地硬卡'
             : '盲投已开启：不看必含/排除词，仍检查年限/学历/活跃度');
         } else {
           addLog('盲投已关闭：恢复关键词检查');
@@ -4118,7 +4120,7 @@
             <div class="bh-ai-row">
               <div class="meta">
                 <div class="lbl">启用 AI 语义筛选</div>
-                <div class="desc">开启后「必含词 + 排除词 + 薪资」交给 AI 判断；<b>学历与工作年限默认不作为筛选条件</b>——只有「求职画像」里明确写出时才按画像判断（如「只投硕士以下」「工作经历 3 年」）；排除词结合岗位性质和上下文，<b>活跃度仍本地检查</b>。关闭后或未配置完整接口时使用完整本地规则，支持技术词别名与明确上下文。</div>
+                <div class="desc">开启后「必含词 + 排除词 + 薪资」交给 AI 判断；<b>学历与工作年限默认不作为筛选条件</b>，由下方「忽略年限和学历要求」开关控制。关闭该开关后，仅按「求职画像」里明确写出的学历/年限筛选条件判断；排除词结合岗位性质和上下文，<b>活跃度仍本地检查</b>。关闭 AI 或未配置完整接口时使用完整本地规则，支持技术词别名与明确上下文。</div>
               </div>
               <div class="control">
                 <label class="bh-ai-toggle violet">
@@ -4141,10 +4143,10 @@
             <div class="bh-ai-criteria-list" id="bh-ai-criteria-list"></div>
             <div class="bh-ai-criteria-note">
               开启 AI 后：<b>薪资</b> 交给 AI 做语义判断（标准取自「规则设置」）；<b>学历与工作年限默认不作为筛选条件</b>——
-              只有「求职画像」里明确写出学历/经验条件时才按画像判断（如「只投硕士以下」「工作经历 3 年」），
+              「忽略年限和学历要求」默认开启，JD 与画像中的学历/年限条件都忽略；关闭此开关后，只有「求职画像」里明确写出学历/经验筛选条件时才按画像判断，
               仅因「JD 要求硕士 / 3 年经验」或「求职者是应届生」<b>不会</b>被拒；
               <b>排除词交给 AI 按上下文判断</b>，如「技术培训」「配合销售」不因字面出现直接排除；<b>活跃度仍本地硬卡</b>。
-              学历/年限条件请写进「求职画像」，薪资/活跃度请去主面板的「规则设置」改，AI 这边不重复配置，避免两处不一致。
+              技术能力与实际项目仍参与匹配。需要学历/年限筛选时请关闭忽略开关并在「求职画像」写明条件；薪资/活跃度在主面板的「规则设置」修改。
             </div>
           </div>
 
@@ -4208,6 +4210,18 @@
           <!-- 分组 3：限制与策略 -->
           <div class="bh-ai-group">
             <div class="bh-ai-group-title">限制与策略</div>
+            <div class="bh-ai-row">
+              <div class="meta">
+                <div class="lbl">忽略年限和学历要求</div>
+                <div class="desc">默认开启：不因 JD 的工作年限、学历门槛或应届身份拒绝，画像里的学历/年限筛选条件也忽略；按技术、项目与岗位方向找相关机会。关闭后仅恢复画像明确写出的学历/年限条件（仅 AI 开启时生效）。</div>
+              </div>
+              <div class="control">
+                <label class="bh-ai-toggle">
+                  <input type="checkbox" data-cfg="aiIgnoreEduExp" aria-label="忽略年限和学历要求" />
+                  <span class="bh-ai-track"><span class="bh-ai-knob"></span></span>
+                </label>
+              </div>
+            </div>
             <div class="bh-ai-row">
               <div class="meta">
                 <div class="lbl">不投短期岗位</div>
@@ -4377,8 +4391,12 @@
     wrap.querySelector('[data-cfg="aiEnabled"]').addEventListener('change', (e) => {
       syncAISettingsButton({ aiEnabled: e.target.checked });
       // v1.0.9：提醒卡跟随开关状态高亮/降饱和
-      renderAICriteria({ ...baseline, aiEnabled: e.target.checked });
+      renderAICriteria(readConfig());
     });
+    for (const key of ['aiIgnoreEduExp', 'aiUserPortrait']) {
+      wrap.querySelector(`[data-cfg="${key}"]`).addEventListener('input', () => renderAICriteria(readConfig()));
+      wrap.querySelector(`[data-cfg="${key}"]`).addEventListener('change', () => renderAICriteria(readConfig()));
+    }
 
     // v1.0.8：关闭前检测「未保存改动」，弹三按钮确认框
     // 之前的设计：× / 取消 / Esc / 点遮罩 都是直接关，未保存改动会静默丢失。
@@ -4502,7 +4520,7 @@
     const cfg = normalizeConfig(input);
     const text = (value) => String(value ?? '').trim();
     const keys = ['aiEnabled', 'aiPrimaryEnabled', 'aiFallback',
-      'aiTimeoutMs', 'aiJDMode', 'aiMaxJDChars', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts'];
+      'aiTimeoutMs', 'aiJDMode', 'aiMaxJDChars', 'aiCacheEnabled', 'aiRejectShortTerm', 'aiStrictFacts', 'aiIgnoreEduExp'];
     const snapshot = Object.fromEntries(keys.map((key) => [key, cfg[key]]));
     snapshot.aiBaseUrl = normalizeChatUrl(cfg.aiBaseUrl);
     snapshot.aiModel = text(cfg.aiModel) || DEFAULT_CONFIG.aiModel;
@@ -4685,6 +4703,7 @@
     setChk('aiRejectShortTerm', cfg.aiRejectShortTerm !== false);
     // v1.0.11：只按明确事实判断（默认开）
     setChk('aiStrictFacts', cfg.aiStrictFacts !== false);
+    setChk('aiIgnoreEduExp', cfg.aiIgnoreEduExp !== false);
     const fb = aiRoot?.querySelector('[data-cfg="aiFallback"]');
     if (fb) fb.value = ['local', 'skip', 'pause'].includes(cfg.aiFallback) ? cfg.aiFallback : 'local';
   }
@@ -4757,6 +4776,7 @@
     cfg.aiRejectShortTerm = g('aiRejectShortTerm') ? gc('aiRejectShortTerm') : (prev.aiRejectShortTerm !== false);
     // v1.0.11：只按明确事实判断；同理，元素不存在时保留已存配置
     cfg.aiStrictFacts = g('aiStrictFacts') ? gc('aiStrictFacts') : (prev.aiStrictFacts !== false);
+    cfg.aiIgnoreEduExp = g('aiIgnoreEduExp') ? gc('aiIgnoreEduExp') : (prev.aiIgnoreEduExp !== false);
     cfg.aiTemperature = num(prev.aiTemperature, DEFAULT_CONFIG.aiTemperature);
     cfg.aiMaxRetries  = num(prev.aiMaxRetries,  DEFAULT_CONFIG.aiMaxRetries);
     cfg.aiCacheDays   = Math.max(1, num(prev.aiCacheDays, DEFAULT_CONFIG.aiCacheDays));
@@ -5141,6 +5161,9 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
   const EXP_DIRECTION_RE = /以上|以下/;
   function profileEduExpPolicy(cfg) {
     cfg = cfg || getAIConfig();
+    if (cfg.aiIgnoreEduExp !== false) {
+      return { edu: [], exp: [], hasEdu: false, hasExp: false, ignored: true, text: '不作为判断依据（忽略年限和学历要求已开启）' };
+    }
     const portrait = String(cfg.aiUserPortrait || '').trim();
     const edu = [];
     const exp = [];
@@ -5183,7 +5206,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
     const F = (n) => `用户已设为「不限」：不得因为${n}判 false（JD 里提到${n}也不能因此拒绝）`;
     // v1.0.20：学历/年限默认不作为判断依据。写成"不得因 JD 的要求、也不得因求职者
     // 身份判 false"（用户实测的两条拒投路径都点名钉死）；不罗列词表，避免负面 priming。
-    const IGNORE = (n, who) => `用户未在【求职画像】中写明${n}条件：${n}一律不作为判断依据，不得因 JD 写明的${n}要求、也不得因${who}判 false`;
+    const IGNORE = (n, who) => `${pe.ignored ? '「忽略年限和学历要求」已开启，画像里的相关筛选条件也忽略' : `用户未在【求职画像】中写明${n}条件`}：${n}一律不作为判断依据，不得因 JD 写明的${n}要求、也不得因${who}判 false`;
     const BY_PROFILE = (n, hits) => `仅按【求职者画像】中明确写出的${n}条件判断（${hits.join('；')}）；画像没写的一律忽略，JD 未写明对应条件时不扣分`;
     return [
       { key: 'yearsMin',   label: '年限',
@@ -5360,7 +5383,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
       lines.push(`- 不投短期岗位：当前岗位明确属于「${st.list}」这类**岗位性质**时，判不匹配；否定表述或其他主体的情况不算。`);
       // v1.0.12：计薪方式与项目时长不再是"短期"的判据（按天计薪 ≠ 短期岗位，用户实测反馈）
       lines.push('- 注意：计薪方式（按天计薪 / 日结 / 小时工 / 按件）和项目时长（6 个月、一年等）**本身不是**短期岗位的判据，');
-      lines.push('  不得因为它们就把岗位归成"短期/实习"。只有明确写了「短期」「实习」「项目制」「兼职」「劳务派遣」才算。');
+      lines.push('  不得因为它们就把岗位归成"短期/实习"。普通实习、长期实习、校招本身不算；只有当前岗位明确属于「短期实习」「项目制」「兼职」「劳务派遣」才算。');
     } else {
       // v1.0.12：关掉时不再罗列关键词（罗列会造成负面 priming，模型反而更爱拿它们拒人），
       // 改成一条正向的"忽略"规则。
@@ -5392,7 +5415,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
     // v1.0.20：学历与工作年限默认不作为判断依据（"只认事实"与"允许推测"两种模式下都生效）。
     // 用户实测的两条拒投路径都点名钉死：① JD 写明的学历/经验要求（"任职要求明确标注硕士及以上"）；
     // ② 拿画像里的身份描述（"求职者为应届"）去碰 JD 要求。只有上面按求职画像列出的条件除外。
-    lines.push('- 学历与工作年限一律不作为判断依据：不得因 JD 写明的学历或经验要求判 false，也不要拿【求职者画像】里的学历或身份描述与 JD 的要求硬碰；只有上面按求职画像列出的学历/经验条件除外。此限制不禁止比较技术技能、熟练程度与真实项目内容。');
+    lines.push('- 学历与工作年限一律不作为判断依据：不得因 JD 写明的学历或经验要求判 false，也不要拿【求职者画像】里的学历或身份描述与 JD 的要求硬碰；' + (pe.ignored ? '「忽略年限和学历要求」已开启，画像及自定义提示里的学历/年限筛选条件也不生效。' : '只有上面按求职画像列出的学历/经验条件除外。') + '此限制不禁止比较技术技能、熟练程度与真实项目内容。');
 
     lines.push('');
     lines.push('【职位信息】');
@@ -5840,13 +5863,88 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
     if (typeof match !== 'boolean') return { ok: false, err: 'match 字段非法：' + JSON.stringify(mv) };
 
     const sc = Number(o.score);
-    return {
+    const result = {
       ok: true,
       match,
       score: Number.isFinite(sc) ? Math.max(0, Math.min(100, Math.round(sc))) : null,
       reason: String(o.reason || '').replace(/\s+/g, ' ').trim().slice(0, 80),
       raw: String(text).slice(0, 2000),
     };
+    // 校验使用完整理由；界面/缓存仍保留短理由，非枚举字段不会进入返回的审计对象。
+    Object.defineProperty(result, 'policyReason', { value: String(o.reason || '').replace(/\s+/g, ' ').trim().slice(0, 20000) });
+    return result;
+  }
+
+  // 程序只识别明确的策略矛盾，再交回模型复核；不能把违规拒绝直接改成匹配。
+  // 这不是通用语义证明，技术方向与真实技能仍由模型按完整画像/JD比较。
+  function validateAIResultPolicy(result, job, cfg = getAIConfig()) {
+    if (!result.ok) return '';
+    const reason = String(result.policyReason || result.reason || '').normalize('NFKC');
+    const pe = profileEduExpPolicy(cfg);
+    const speculative = /疑似|可能|大概|大概率|推测|风险(?:高|较高|偏高|很高)|流程(?:不符|异常)|公司身份|不像.{0,8}校招|\b(?:likely|probably|suspect(?:ed)?|(?:high|higher|potential)\s+risk)\b/i.test(reason);
+    const unrelated = /(?:方向|职责|技术栈|工作内容).{0,12}(?:无关|不相关|不匹配|不符|相反)|(?:无关|不相关).{0,12}(?:方向|职责)|\b(?:unrelated|direction mismatch)\b/i.test(reason);
+    const eduSignal = /学历|学位|大专|专科|本科|学士|硕士|研究生|博士|\b(?:degree|bachelor(?:'s)?|master(?:'s|’s)(?:\s+degree)?|master\s+degree|phd|diploma)\b/i.test(reason);
+    const eduThreshold = /学历|学位|(?:要求|至少|仅限|必须|需要).{0,8}(?:大专|本科|硕士|博士)|(?:大专|本科|硕士|博士).{0,8}(?:以上|以下|不符|门槛)|\b(?:degree|required|requires)\b/i.test(reason);
+    const jobForms = [String(job?.title || ''), String(job?.jd || '')].join('\n');
+    const fullTimeOption = /全职\s*(?:[/、或|]|和)\s*兼职|兼职\s*(?:[/、或|]|和)\s*全职|全职.{0,8}(?:任选|均可|可选)/.test(jobForms);
+    if (!result.match) {
+      if (!pe.hasEdu && eduSignal && !(unrelated && !eduThreshold)) {
+        return '学历不作为拒绝依据；请仅按技术、项目、岗位方向和其他已启用条件重新判断';
+      }
+      if (!pe.hasExp && /(?:\d+(?:[.\-~至到]\d+)?|[一二三四五六七八九十数多几]+)\s*\+?\s*(?:年|years?\b)|年限|工龄|资历|年资|应届|往届|工作(?:经历|经验)(?:不足|不够|不符|缺乏|缺少)|\b(?:graduate|seniority)\b/i.test(reason)) {
+        return '工作年限与应届身份不作为拒绝依据；具体技术能力和项目仍须比较';
+      }
+      if (cfg.aiStrictFacts !== false && speculative) {
+        return '只按明确事实判断已开启，不得以推测、公司背景或流程风险拒绝';
+      }
+      if (cfg.aiStrictFacts !== false && /(?:画像|简历|候选人|求职者|应聘者).{0,18}(?:未(?:写|提及|列|体现|验证|证明)|没有(?:提及|列出|验证|证明))|未验证|证据不足|\b(?:insufficient evidence|unverified|(?:profile|candidate|resume).{0,30}(?:does not mention|not (?:mention|list|verif|prove)))/i.test(reason)) {
+        return '画像未提及或能力未验证不代表不会；须依据明确事实冲突判断，未知技能留待面试确认';
+      }
+      if (!(cfg.aiStrictFacts === false && speculative)) {
+        const terms = ['短期', '实习', '项目制', '劳务派遣', '派遣', '兼职', '按天', '日结', '小时工', '项目时长', '合同期限'];
+        const exclusions = state.skipKeywordCheck ? [] : (cfg.mustNot || []).flatMap(splitKeywordAlts);
+        const explicitExclusion = exclusions.some((term) => includesKeyword(reason, term) && findLocalMustNotHit(jobForms, { mustNot: [term] }));
+        const formReason = terms.some((word) => reason.includes(word)) && (!unrelated
+          || /(?:因|因为|属于|不投|过滤|排除).{0,12}(?:短期|实习|兼职|项目制|派遣|日结)|(?:短期|实习|兼职|项目制|派遣|日结).{0,12}(?:所以|导致|因此|不符|不适合|拒绝)/.test(reason));
+        if (cfg.aiRejectShortTerm === false && !explicitExclusion && formReason) {
+          return '短期岗位过滤已关闭，未列入用户明确排除项的实习、岗位形式与计薪方式不能作为拒绝依据';
+        }
+        if (cfg.aiRejectShortTerm !== false && !explicitExclusion
+            && !unrelated && /短期|实习|校招|按天|日结|小时工|按件|\d+\s*个月|半年|合同期限|项目时长/.test(reason)) {
+          const clauses = [String(job?.title || ''), ...String(job?.jd || '').split(/[\r\n。；;！？!?]+/)];
+          const hasNature = SHORT_TERM_KEYWORDS.some((word) => clauses.some((clause) => {
+            const hits = [...clause.matchAll(new RegExp(escapeRegExp(word), 'g'))];
+            return hits.some((hit) => !localExclusionContextIgnored(clause, hit.index, word));
+          }));
+          if (!hasNature || fullTimeOption) return '短期过滤只认当前岗位明确的短期实习、项目制、劳务派遣或兼职；普通实习、校招、计薪方式与期限本身不能据此拒绝，存在全职可选分支时须按该分支判断';
+        }
+      }
+    } else if (cfg.aiRejectShortTerm !== false) {
+      if (fullTimeOption) return '';
+      // 仅核对标题或直接写明的当前岗位性质，供应商、福利、期限和普通实习不算。
+      const title = String(job?.title || '');
+      const clauses = String(job?.jd || '').split(/[\r\n。；;！？!?]+/);
+      for (const word of SHORT_TERM_KEYWORDS) {
+        const at = title.indexOf(word);
+        if (at >= 0 && !localExclusionContextIgnored(title, at, word)) return '不投短期岗位已开启，标题明确的当前岗位性质为「' + word + '」，请复核';
+        const assertion = new RegExp('^(?:本|该|此)?(?:岗位|职位|用工)(?:性质|类型|形式)?\\s*(?:为|是|属于|采用|[:：])\\s*' + word);
+        if (clauses.some((clause) => assertion.test(clause.trim()))) return '不投短期岗位已开启，JD明确的当前岗位性质为「' + word + '」，请复核';
+      }
+    }
+    return '';
+  }
+
+  function currentAIPolicyRules(cfg) {
+    return '【当前开关策略（优先于默认和自定义提示中的学历、年限及岗位形式规则）】\n'
+      + (cfg.aiIgnoreEduExp !== false
+        ? '忽略年限和学历要求已开启：JD、画像与自定义提示中的学历及工作年限条件一律不作为拒绝依据；应届身份不得触发经验门槛。技术能力、熟练程度和真实项目仍须比较。\n'
+        : '忽略年限和学历要求已关闭：仅按本次筛选标准列出的画像明确学历/年限条件判断；身份背景不自动成为筛选门槛。\n')
+      + (cfg.aiRejectShortTerm !== false
+        ? '不投短期岗位已开启：仅当前岗位明确属于短期实习、项目制、劳务派遣、兼职时排除；普通实习、校招、计薪方式和项目时长不算。全职/兼职均可时，按可投的全职分支判断。\n'
+        : '不投短期岗位已关闭：不得自行因岗位形式或计薪方式拒绝；用户另行明确设置的排除项仍按完整上下文判断。\n')
+      + (cfg.aiStrictFacts !== false
+        ? '只按明确事实判断已开启：禁止推测性拒绝，未知技能不能作为缺乏经验的事实。'
+        : '只按明确事实判断已关闭：允许有依据的保守风险推测；技术能力仍按事实，不得编造缺口。');
   }
 
   // ---- 11.5 结论缓存 ----
@@ -5903,13 +6001,14 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
   // v1.1.12：按相关基础筛选投递机会，未知技能不作自动缺口，旧严格拒绝缓存作废。
   function aiCacheFingerprint(cfg) {
     cfg = cfg || getAIConfig();
-    return 'v112|' + stableAIHash({
+    return 'v113|' + stableAIHash({
       aiEnabled: cfg.aiEnabled === true,
       skipKeywordCheck: !!state.skipKeywordCheck,
       aiMaxJDChars: Number(cfg.aiMaxJDChars || 2500),
       aiJDMode: cfg.aiJDMode === 'truncate' ? 'truncate' : 'full',
       aiRejectShortTerm: cfg.aiRejectShortTerm !== false,
       aiStrictFacts: cfg.aiStrictFacts !== false,
+      aiIgnoreEduExp: cfg.aiIgnoreEduExp !== false,
       mustHave: (cfg.mustHave || []).map(String),
       mustHaveMin: Number(cfg.mustHaveMin || 0),
       mustNot: (cfg.mustNot || []).map(String),
@@ -6020,7 +6119,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
     // 1) 缓存
     if (cfg.aiCacheEnabled && !opts?.bypassCache) {
       const c = getAICache(jobId, job);
-      if (c) {
+      if (c && !validateAIResultPolicy({ ok: true, match: !!c.match, reason: c.reason }, job, cfg)) {
         state._aiHits = (state._aiHits || 0) + 1;
         incStatsAiHit();
         addLog(`AI缓存命中：${title} → ${c.match ? '通过' : '拒绝'}${c.reason ? '｜' + safeAIError(c.reason, cfg, 80) : ''}`);
@@ -6037,6 +6136,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
         EXCLUSION_CONTEXT_RULES,
         DIRECTION_MATCH_RULES,
         CANDIDATE_PROFILE_RULES,
+        currentAIPolicyRules(cfg),
       ].join('\n\n') },
       { role: 'user', content: buildAIPrompt(job, preparedJD, cfg) },
     ];
@@ -6046,41 +6146,60 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
     // 不得让主 API 被长期跳过；全部失败后的等待由 runAIGate 统一处理。
     const candidates = selected;
     const errors = [];
+    let policyViolation = false;
     for (const endpoint of candidates) {
       let lastResult;
-      if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
-      while (!testingDraft && state.paused && !aiOperationStopped(cfg)) await sleep(300);
-      if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
-      if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
-      if (!testingDraft && aiCacheFingerprint() !== requestFingerprint) {
-        return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
-      }
-      const requestAudit = createAIRequestAudit(job, cfg, preparedJD, messages, endpoint, requestFingerprint);
-      addLog(`🤖 准备调用 ${endpoint.name}：${title} | 职位ID ${jobId || '(未提供)'} | 画像 ${requestAudit.portraitChars} 字 | JD ${preparedJD.originalChars}→${preparedJD.sentChars} 字（${preparedJD.truncated ? '手动裁剪' : '全文'}）`, 'info',
-        formatAIRequestAudit(requestAudit, false));
-      const r = await callLLM(messages, opts?.transport, endpointConfig(cfg, endpoint), testingDraft ? null : requestFingerprint, candidates.length > 1);
-      // Native storage reporting may already have stopped the run. Preserve the
-      // local failure cause instead of turning it into a generic cancellation.
-      if (r.storageFailure) return r;
-      while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
-      if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
-      if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
-      if (r.storageFailure || r.cancelled || r.policyChanged || r.inputChanged) return r;
-      if (r.ok) {
-        const p = parseAIResult(r.text);
-        if (p.ok) {
-          if (!testingDraft && aiCacheFingerprint() !== requestFingerprint) {
-            return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
-          }
-          markAIEndpoint(endpoint, { ok: true }, cfg);
-          const reason = safeAIError(p.reason, cfg, 80);
-          if (cfg.aiCacheEnabled && !opts?.bypassCache) setAICache(jobId, { match: p.match, score: p.score, reason }, job);
-          return { ...p, reason, cached: false, endpointId: endpoint.id, endpointName: endpoint.name,
-            transport: r.transport, raw: safeAIError(p.raw, cfg, 2000), policyFingerprint: requestFingerprint, requestAudit };
+      let attemptMessages = messages;
+      for (let policyAttempt = 0; policyAttempt < 2; policyAttempt++) {
+        if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+        while (!testingDraft && state.paused && !aiOperationStopped(cfg)) await sleep(300);
+        if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+        if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
+        if (!testingDraft && aiCacheFingerprint() !== requestFingerprint) {
+          return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
         }
-        lastResult = { ok: false, err: safeAIError(p.err, cfg), retryable: false };
-      } else {
-        lastResult = { ...r, err: safeAIError(r.err, cfg) };
+        const requestAudit = createAIRequestAudit(job, cfg, preparedJD, attemptMessages, endpoint, requestFingerprint);
+        addLog(`🤖 准备调用 ${endpoint.name}：${title} | 职位ID ${jobId || '(未提供)'} | 画像 ${requestAudit.portraitChars} 字 | JD ${preparedJD.originalChars}→${preparedJD.sentChars} 字（${preparedJD.truncated ? '手动裁剪' : '全文'}）`, 'info',
+          formatAIRequestAudit(requestAudit, false));
+        const r = await callLLM(attemptMessages, opts?.transport, endpointConfig(cfg, endpoint), testingDraft ? null : requestFingerprint, candidates.length > 1);
+        // Native storage reporting may already have stopped the run. Preserve the
+        // local failure cause instead of turning it into a generic cancellation.
+        if (r.storageFailure) return r;
+        while (typeof cfg._isCurrentInput === 'function' && state.paused && !aiOperationStopped(cfg)) await sleep(300);
+        if (aiOperationStopped(cfg)) return { ok: false, cancelled: true, err: '已停止' };
+        if (aiInputChanged(cfg._isCurrentInput)) return changedAIInputResult();
+        if (r.storageFailure || r.cancelled || r.policyChanged || r.inputChanged) return r;
+        if (r.ok) {
+          const p = parseAIResult(r.text);
+          if (p.ok) {
+            if (!testingDraft && aiCacheFingerprint() !== requestFingerprint) {
+              return { ok: false, policyChanged: true, err: '筛选规则已变化，旧 AI 结论作废' };
+            }
+            const violation = validateAIResultPolicy(p, job, cfg);
+            if (violation) {
+              policyViolation = true;
+              lastResult = { ok: false, policyViolation: true, err: 'AI 结论违反开关策略：' + violation, retryable: false };
+              if (policyAttempt === 0) {
+                addLog(`AI 策略复核：${title} | ${violation}；重新判断，不采用本次结论`, 'info');
+                attemptMessages = [
+                  { ...messages[0], content: messages[0].content + '\n\n【程序策略复核】\n上次结论未通过策略检查：' + violation + '。请重新阅读完整画像与职位信息，依据当前开关判断。不得直接反转 match，也不能编造技能或替换为无依据的拒绝理由；只输出 JSON。' },
+                  messages[1],
+                ];
+                continue;
+              }
+              break;
+            }
+            markAIEndpoint(endpoint, { ok: true }, cfg);
+            const reason = safeAIError(p.reason, cfg, 80);
+            if (cfg.aiCacheEnabled && !opts?.bypassCache) setAICache(jobId, { match: p.match, score: p.score, reason }, job);
+            return { ...p, reason, cached: false, endpointId: endpoint.id, endpointName: endpoint.name,
+              transport: r.transport, raw: safeAIError(p.raw, cfg, 2000), policyFingerprint: requestFingerprint, requestAudit };
+          }
+          lastResult = { ok: false, err: safeAIError(p.err, cfg), retryable: false };
+        } else {
+          lastResult = { ...r, err: safeAIError(r.err, cfg) };
+        }
+        break;
       }
       markAIEndpoint(endpoint, lastResult || { ok: false, err: '请求失败' }, cfg);
       errors.push(`${endpoint.name}：${lastResult?.err || '请求失败'}${lastResult?.transport ? `（通道:${lastResult.transport}）` : ''}`);
@@ -6095,7 +6214,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
     }
     writeAIHealth(health);
     try { renderAIEndpointHealth(); } catch (_) {}
-    return { ok: false, apiUnavailable: true, retryAt, retryDelayMs: AI_RETRY_DELAY_MS,
+    return { ok: false, apiUnavailable: true, ...(policyViolation ? { policyViolation: true } : {}), retryAt, retryDelayMs: AI_RETRY_DELAY_MS,
       err: errors.join('；') || 'AI 调用失败' };
   }
 
@@ -7660,7 +7779,7 @@ RTOS 岗位同时列出 VxWorks、RT-Thread、Zephyr、FreeRTOS 及 Linux 字符
       getJobCardClickTarget, getJobCardClickTargets, selectJobCard, advanceToNextJobCard, humanClick, autoChatOnDetail,
       // v1.0.15：HR 实时状态徽标的识别（只认逐字精确的那几个词）
       isLiveBadge,
-      aiScreen, callLLM, buildAIPrompt, parseAIResult, cleanJDText, prepareAIJDText,
+      aiScreen, callLLM, buildAIPrompt, parseAIResult, validateAIResultPolicy, cleanJDText, prepareAIJDText,
       getAICache, setAICache, clearAICache, aiCacheSize, testAIConnection, maskKey,
       fetchAIModelList, deriveModelsUrl, getAIConfig, normalizeChatUrl, aiRequestUrl,
       getAIEndpoints, getAIEndpointHealth, renderAIEndpointHealth,

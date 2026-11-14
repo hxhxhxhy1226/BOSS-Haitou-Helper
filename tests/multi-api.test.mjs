@@ -355,7 +355,7 @@ test('v119严格Linux拒绝缓存升级后重新请求，两份API完整接收�
   cache[target.jobId].pf = cache[target.jobId].pf.replace(/^v\d+\|/, 'v119|');
   f.store.set('boss_helper_ai_cache_v1', cache);
   f.win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(cache));
-  assert.match(f.BH.aiCacheFingerprint(), /^v112\|/);
+  assert.match(f.BH.aiCacheFingerprint(), /^v113\|/);
   const result = await f.BH.aiScreen(target);
   assert.equal(result.ok, true);
   assert.equal(result.match, true);

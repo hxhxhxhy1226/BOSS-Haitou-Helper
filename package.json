@@ -1,6 +1,6 @@
 {
   "name": "boss-job-helper",
-  "version": "1.1.12",
+  "version": "1.1.13",
   "private": true,
   "description": "BOSS 直聘本地规则与 AI 岗位筛选 Edge 独立扩展",
   "engines": {

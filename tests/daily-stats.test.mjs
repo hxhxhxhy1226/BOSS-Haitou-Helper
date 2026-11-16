@@ -234,7 +234,9 @@ test('GM 与 localStorage 均不可写时禁止投递和 AI 付费请求', async
 
 test('兼容存储全部不可写时返回本地存储错误并停止，不进入接口一分钟重试循环', async (t) => {
   const f = fixture(t, { failGM: true, failLocal: true });
+  // 画像与正文齐备，确保命中存储失败分支而不是 1.1.14 的输入不完整跳过。
   f.BH.state.config = { ...f.BH.loadConfig(), aiEnabled: true, aiDailyLimit: 0, aiCacheEnabled: false,
+    aiUserPortrait: '合成画像：熟悉 C/C++ 与 STM32 固件开发。',
     aiBaseUrl: 'https://api.fixture.example/v1', aiApiKey: 'fixture-key', aiModel: 'fixture-model' };
   f.BH.state.stopFlag = false;
   const result = await f.BH.runAIGate(null, { jobId: 'local-storage-failure', title: '嵌入式软件', jd: 'STM32 固件研发。' });

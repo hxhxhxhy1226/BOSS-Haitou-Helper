@@ -326,19 +326,23 @@ for (const custom of [false, true]) {
         const user = sent.find((item) => item.role === 'user').content;
         assert.ok(user.includes(profile), 'The entire actual profile must reach each API');
         assert.ok(user.includes(sample.jd), 'The entire current fixture JD must reach each API');
-        assert.match(system, /任务是投递机会筛选，不是完全胜任评审/);
-        assert.match(system, /未知技能属于待面试确认/);
-        assert.match(system, /拒绝 reason 必须简短引用这两侧依据/);
+        assert.match(system, /任务是岗位匹配筛选，不是仅排除明显风险/);
+        assert.match(system, /match=true 必须先有岗位核心职责与画像已掌握技能、真实项目或明确求职目标之间的直接正向关联/);
+        assert.match(system, /未知次要技能留待面试确认/);
+        assert.match(system, /后者须简短引用 JD 与画像两侧依据/);
         assert.match(system, /画像写明 FreeRTOS 开发.*应承认已有 RTOS 开发经验/);
         assert.match(system, /JD 的“了解\/熟悉\/掌握\/精通\/深入\/必须独立”保持原有强度/);
         assert.doesNotMatch(system, /或岗位以画像未验证的专业技术为必备核心且没有匹配职责/);
-        assert.match(user, /本次是投递机会筛选/);
-        assert.match(user, /未知技能留待面试确认，不以完全胜任为前提/);
+        assert.match(user, /先执行岗位方向门槛：只有核心职责与画像的技能、真实项目或求职目标存在明确正向关联才可通过/);
+        assert.match(user, /未知次要技能留待面试确认，不以完全胜任为前提/);
         const sentJD = user.slice(user.indexOf('JD 正文：\n') + 'JD 正文：\n'.length);
         if (sample.noLinux) assert.doesNotMatch(sentJD, /Linux/i, 'Policy examples must not become fabricated requirements in the actual JD');
         if (custom) {
           assert.ok(system.startsWith(oldTemplate));
-          assert.match(system, /若旧的自定义模板要求.*以本次基础相关优先尝试的投递偏好为准/);
+          assert.match(system, /若旧的自定义模板要求.*以本次“核心方向有明确正向关联才通过”的规则为准/);
+        } else {
+          // 默认系统提示才带这条总纲；自定义模板下由画像/方向规则块承担同一约束。
+          assert.match(system, /通用语言\/基础重合、不冲突、可学习或方向不明均判 match=false/);
         }
       }
     });
@@ -355,7 +359,7 @@ test('v119严格Linux拒绝缓存升级后重新请求，两份API完整接收�
   cache[target.jobId].pf = cache[target.jobId].pf.replace(/^v\d+\|/, 'v119|');
   f.store.set('boss_helper_ai_cache_v1', cache);
   f.win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(cache));
-  assert.match(f.BH.aiCacheFingerprint(), /^v113\|/);
+  assert.match(f.BH.aiCacheFingerprint(), /^v114\|/);
   const result = await f.BH.aiScreen(target);
   assert.equal(result.ok, true);
   assert.equal(result.match, true);

@@ -240,6 +240,31 @@ test('明确无关技术职责的有效拒绝保留，一般技术经验不被�
   assert.equal(f.BH.validateAIResultPolicy({ ok: true, match: false, reason: '缺乏FOC算法技术经验，JD核心技术为FOC算法' }, target(), f.BH.state.config), '');
 });
 
+test('核心方向只有通用技能重合、缺少正向关联时拒绝合法且不触发纠正', { timeout: 8000 }, async (t) => {
+  const reason = '仅凭通用C/C++基础重合，岗位核心职责与嵌入式固件目标缺少明确正向关联，因此不匹配';
+  const f = await fixture(t, { gm: (o) => respond(o, { match: false, score: 20, reason }) });
+  const job = { ...target('generic-overlap-only'), title: '通用软件开发工程师',
+    jd: '负责通用业务后端服务开发。任职要求：熟悉 C/C++ 或 Java，具备计算机基础。' };
+  assert.equal(f.BH.validateAIResultPolicy({ ok: true, match: false, reason }, job, f.BH.state.config), '');
+  const result = await f.BH.runAIGate(null, job);
+  assert.equal(result.action, 'reject');
+  assert.equal(f.requests.length, 1, 'direction evidence gap must be consumed without asking the model again');
+});
+
+test('画像或当前岗位正文缺失时直接跳过，不请求 AI 也不自动沟通', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t);
+  await f.BH.applyConfig({ ...f.BH.state.config, aiUserPortrait: '' });
+  const noProfile = await f.BH.runAIGate(null, target('missing-portrait'));
+  assert.equal(noProfile.action, 'skip');
+  assert.match(noProfile.reason, /未填写求职画像/);
+  assert.equal(f.requests.length, 0);
+  await f.BH.applyConfig({ ...f.BH.state.config, aiUserPortrait: portrait });
+  const noJD = await f.BH.runAIGate(null, { ...target('missing-jd'), jd: '' });
+  assert.equal(noJD.action, 'skip');
+  assert.match(noJD.reason, /未取得职位正文/);
+  assert.equal(f.requests.length, 0, 'incomplete matching inputs must never be auto-accepted');
+});
+
 test('关闭短期过滤仍保留用户明确排除的兼职，关闭事实开关允许风控推测', async (t) => {
   const f = await fixture(t, { cfg: { aiRejectShortTerm: false, mustNot: ['兼职'] }, gm: (o) => respond(o,
     { match: false, score: 10, reason: 'JD明确写明兼职招聘，命中用户兼职排除项' }) });

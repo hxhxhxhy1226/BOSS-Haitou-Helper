@@ -256,7 +256,7 @@ try {
   await evaluate(page, "document.querySelector('#bh-ai-modal [data-cfg=aiIgnoreEduExp]').closest('.bh-ai-group').scrollIntoView({block:'start'})");
   await delay(350); // Capture after the modal and toggle transitions finish.
   const policyScreenshot = await send('Page.captureScreenshot', { format: 'png' }, page);
-  await fs.writeFile(path.join(output, 'edge-ai-policy-1.1.13.png'), Buffer.from(policyScreenshot.data, 'base64'));
+  await fs.writeFile(path.join(output, 'edge-ai-policy-1.1.14.png'), Buffer.from(policyScreenshot.data, 'base64'));
   for (let attempt = 0; attempt < 2; attempt++) {
     await evaluate(page, "document.querySelector('#bh-ai-modal [data-act=aimodels]').click()");
     await until(() => evaluate(page, "document.querySelector('#bh-detail-modal [data-role=body]')?.value.includes('尚未授权')"));

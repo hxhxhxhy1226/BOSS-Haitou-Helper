@@ -89,18 +89,24 @@ for (const failure of [
   { label: '无法解析判定', run: (o) => response(o, 200, { choices: [{ message: { content: '今天系统维护' } }] }) },
 ]) {
   test(`${failure.label}自动切到备用 API 并使用备用模型/密钥`, async (t) => {
-    const f = await fixture(t, { gm: (o) => o.url === PRIMARY ? failure.run(o) : response(o, 200, good(false)) });
-    const r = await f.BH.aiScreen(job());
+    const rejectionReason = '本岗位为外包驻场，命中用户明确排除的外包';
+    const rejectedJob = { ...job(), jd: job().jd + '本岗位为外包驻场。' };
+    const f = await fixture(t, { cfg: { mustNot: ['外包'] }, gm: (o) => o.url === PRIMARY ? failure.run(o)
+      : response(o, 200, { choices: [{ message: { content: JSON.stringify({ match: false, score: 20, reason: rejectionReason }) } }] }) });
+    const r = await f.BH.aiScreen(rejectedJob);
     assert.equal(r.ok, true, r.err);
     assert.equal(r.match, false, '备用 AI 的不匹配结论必须保留');
+    assert.equal(r.reason, rejectionReason, '明确排除拒绝保留原始依据，不被MCU关联改成通过');
     assert.equal(f.postURLs()[0], PRIMARY);
     assert.equal(f.postURLs().at(-1), BACKUP);
     const backupRequest = f.requests.find((req) => req.url === BACKUP);
     assert.equal(backupRequest.body.model, 'backup-model');
     assert.equal(backupRequest.headers.Authorization, 'Bearer sk-backup-fixture-secret');
     assert.equal(f.BH.loadStats().aiCalls, f.postURLs().length, '失败尝试也计入每日统计');
-    const next = await f.BH.aiScreen(job('next-job'));
+    const next = await f.BH.aiScreen({ ...rejectedJob, jobId: 'next-job' });
     assert.equal(next.ok, true);
+    assert.equal(next.match, false);
+    assert.equal(next.reason, rejectionReason);
     assert.equal(f.postURLs().at(-1), BACKUP);
     assert.equal(f.postURLs().filter((url) => url === PRIMARY).length, 2, '后续岗位仍从用户设置的第一项开始');
   });
@@ -326,23 +332,25 @@ for (const custom of [false, true]) {
         const user = sent.find((item) => item.role === 'user').content;
         assert.ok(user.includes(profile), 'The entire actual profile must reach each API');
         assert.ok(user.includes(sample.jd), 'The entire current fixture JD must reach each API');
-        assert.match(system, /任务是岗位匹配筛选，不是仅排除明显风险/);
-        assert.match(system, /match=true 必须先有岗位核心职责与画像已掌握技能、真实项目或明确求职目标之间的直接正向关联/);
+        assert.match(system, /任务是筛选值得投递的相关岗位，不是逐项验证能否完全胜任/);
+        assert.match(system, /match=true 需要当前实际职责或明确可选招聘分支与画像技能、真实项目或求职目标有正向关联，再确认无明确硬性冲突/);
+        assert.match(system, /不要求所有核心职责或最主要业务与既有项目完全一致/);
         assert.match(system, /未知次要技能留待面试确认/);
         assert.match(system, /后者须简短引用 JD 与画像两侧依据/);
         assert.match(system, /画像写明 FreeRTOS 开发.*应承认已有 RTOS 开发经验/);
         assert.match(system, /JD 的“了解\/熟悉\/掌握\/精通\/深入\/必须独立”保持原有强度/);
         assert.doesNotMatch(system, /或岗位以画像未验证的专业技术为必备核心且没有匹配职责/);
-        assert.match(user, /先执行岗位方向门槛：只有核心职责与画像的技能、真实项目或求职目标存在明确正向关联才可通过/);
+        assert.match(user, /先执行岗位方向门槛：实际职责或可选招聘分支与画像技能、项目或求职目标有关即可/);
+        assert.match(user, /通用语言\/基础重合、不冲突或无关标签不能单独通过/);
         assert.match(user, /未知次要技能留待面试确认，不以完全胜任为前提/);
         const sentJD = user.slice(user.indexOf('JD 正文：\n') + 'JD 正文：\n'.length);
         if (sample.noLinux) assert.doesNotMatch(sentJD, /Linux/i, 'Policy examples must not become fabricated requirements in the actual JD');
         if (custom) {
           assert.ok(system.startsWith(oldTemplate));
-          assert.match(system, /若旧的自定义模板要求.*以本次“核心方向有明确正向关联才通过”的规则为准/);
+          assert.match(system, /若旧的自定义模板要求.*以本次“实际工作方向相关即可，不要求完全胜任”的规则为准/);
         } else {
           // 默认系统提示才带这条总纲；自定义模板下由画像/方向规则块承担同一约束。
-          assert.match(system, /通用语言\/基础重合、不冲突、可学习或方向不明均判 match=false/);
+          assert.match(system, /只有通用语言\/基础重合、不冲突或实际无关时不能通过/);
         }
       }
     });
@@ -359,7 +367,7 @@ test('v119严格Linux拒绝缓存升级后重新请求，两份API完整接收�
   cache[target.jobId].pf = cache[target.jobId].pf.replace(/^v\d+\|/, 'v119|');
   f.store.set('boss_helper_ai_cache_v1', cache);
   f.win.localStorage.setItem('boss_helper_ai_cache_v1', JSON.stringify(cache));
-  assert.match(f.BH.aiCacheFingerprint(), /^v114\|/);
+  assert.match(f.BH.aiCacheFingerprint(), /^v115\|/);
   const result = await f.BH.aiScreen(target);
   assert.equal(result.ok, true);
   assert.equal(result.match, true);

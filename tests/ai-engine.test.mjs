@@ -157,7 +157,11 @@ section('3. buildAIPrompt 组装（4.2）');
   resetAll(); setCfg(CFG({ aiJDMode: 'truncate', aiMaxJDChars: 100 }));
   const long = '岗位职责：' + '串口通信与驱动开发 '.repeat(200);
   const p = BH.buildAIPrompt({ title: '嵌入式工程师', company: 'A公司', salary: '20-30K', jd: long, jobId: 'j1' });
-  ok('JD 超过 aiMaxJDChars 会被截断', p.includes('已截断') && p.length < long.length + 800, 'prompt长度=' + p.length);
+  const sentJD = p.split('JD 正文：\n')[1].split('\n\n请严格按系统提示')[0];
+  const truncatedJD = sentJD.split('\n…（JD 已截断')[0];
+  ok('JD 超过 aiMaxJDChars 会按最小200字符预算截断，不把提示词长度算入JD预算',
+     sentJD.includes('已截断') && truncatedJD === BH.cleanJDText(long).slice(0, 200)
+     && truncatedJD.length === 200 && !p.includes(long), '发送JD长度=' + sentJD.length);
   ok('包含求职者画像', p.includes('5年嵌入式软件工程师'));
   ok('包含职位标题/公司/薪资', p.includes('嵌入式工程师') && p.includes('A公司') && p.includes('20-30K'));
 
@@ -1405,14 +1409,14 @@ section('27. 「只按明确事实判断」开关（v1.0.11）');
   ok('开：明确点名禁止「疑似 / 可能 / 风险高 / 流程不符」',
      /疑似/.test(pOn) && /风险高/.test(pOn) && /流程不符/.test(pOn));
   ok('开：禁止对公司招聘流程做外部推测', /不要对公司背景/.test(pOn));
-  ok('开：核心方向须正向匹配，技能冲突才引两侧事实且未知次要技能不算缺口',
-     /核心职责与画像缺少明确正向关联时可判 false/.test(pOn)
-     && /核心技能拒绝须依据 JD 明确强制条件与画像明确事实的实质冲突/.test(pOn)
-     && /未知次要技能不能作为缺口/.test(pOn));
-  ok('开：要求通过理由写明核心职责与画像的具体关联', /通过理由必须写明核心职责与画像的具体正向关联/.test(pOn));
+  ok('开：实际方向须相关，技能拒绝须引两侧冲突且未知技能不算缺口',
+     /实际工作方向与画像无关时可判 false/.test(pOn)
+     && /拒绝须依据用户明确排除或 JD 强制条件与画像明确事实的实质冲突/.test(pOn)
+     && /未知技能不能改写为缺乏经验/.test(pOn));
+  ok('开：要求通过理由写明真实职责或可选分支与画像的具体关联', /通过理由写明真实职责或可选分支与画像的具体关联/.test(pOn));
   ok('SYSTEM_PROMPT 禁止风险推测但保留核心方向门槛', /禁止公司背景、招聘流程等推测性风险拒绝/.test(BH.SYSTEM_PROMPT)
-    && /核心方向缺少正向关联可拒绝/.test(BH.SYSTEM_PROMPT)
-    && /不能把未知次要技能当作缺口/.test(BH.SYSTEM_PROMPT));
+    && /实际工作方向无关可拒绝/.test(BH.SYSTEM_PROMPT)
+    && /不能把未知平台或协议当作缺口/.test(BH.SYSTEM_PROMPT));
 
   setCfg({ ...d1, aiEnabled: true, aiStrictFacts: false });
   const pOff = BH.buildAIPrompt({ title: '嵌入式开发', company: '华为', jd, jobId: 'F1' });
@@ -1727,7 +1731,7 @@ section('32. HR 在线仍被判「活跃 14 天前」：实时徽标采不到（
      absent.ok === false && !absent.activeText, JSON.stringify(absent));
 
   // 32e. 缓存指纹升级
-  ok('AI 结论缓存指纹已更新到 v114（旧宽松通过结论不得沿用）', /^v114\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
+  ok('AI 结论缓存指纹已更新到 v115（旧方向判断结论不得沿用）', /^v115\|/.test(BH.aiCacheFingerprint(BH.getAIConfig())),
      BH.aiCacheFingerprint(BH.getAIConfig()));
 
   resetAll();
@@ -2707,8 +2711,8 @@ section('48. 开启 AI 不再因学历/工作经验拒投：只认求职画像�
      && !/经验要求（当前岗位字段）/.test(sentPrompt), sentPrompt.slice(0, 200));
 
   // 48e. 缓存指纹：v1.0.20 的 prompt 结构变化必须让旧结论失效
-  ok('缓存指纹升级到 v114（旧宽松通过结论自动失效）',
-     /^v114\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
+  ok('缓存指纹升级到 v115（旧方向判断结论自动失效）',
+     /^v115\|/.test(BH.aiCacheFingerprint(cfg)), BH.aiCacheFingerprint(cfg).slice(0, 10));
   ok('指纹随画像变化（写不写学历/经验条件直接影响结论）',
      BH.aiCacheFingerprint({ ...cfg, aiUserPortrait: '只投硕士以下' }) !== BH.aiCacheFingerprint(cfg));
 
@@ -2763,11 +2767,12 @@ section('49. 岗位方向匹配以实际职责和明确可选子方向为依据'
   // 49a. 大类校招有明确可选子方向时不能因并列招聘自动拒绝。
   ok('SYSTEM_PROMPT 维度 1 写明以画像技术栈与求职意向为核心依据',
      /核心依据/.test(BH.SYSTEM_PROMPT));
-  ok('SYSTEM_PROMPT 须先有正向关联，方向成立后次要技能再留待确认',
-     /match=true 必须指出核心职责与画像的直接正向关联/.test(BH.SYSTEM_PROMPT)
+  ok('SYSTEM_PROMPT 须指出真实职责或可选分支关联，方向成立后次要技能再留待确认',
+     /match=true 须指出真实职责或可选分支与画像的正向关联/.test(BH.SYSTEM_PROMPT)
      && /未知次要技能留待面试确认/.test(BH.SYSTEM_PROMPT));
-  ok('SYSTEM_PROMPT 维度 1 以真实核心职责、必备要求和可选子方向判断',
-     /真实核心职责、必备要求及明确可选择的招聘子方向/.test(BH.SYSTEM_PROMPT));
+  ok('SYSTEM_PROMPT 维度 1 以实际工作、必备要求和可选子方向判断',
+     /当前岗位实际工作、必备要求及明确可选择的招聘子方向/.test(BH.SYSTEM_PROMPT)
+     && /不要求最主要业务、整份 JD、芯片或既有项目完全一致/.test(BH.SYSTEM_PROMPT));
 
   // 49b. 画像非空：prompt 画像段带方向匹配规则
   resetAll();
@@ -2777,15 +2782,18 @@ section('49. 岗位方向匹配以实际职责和明确可选子方向为依据'
   };
   setCfg(cfg);
   const p = BH.buildAIPrompt(hwJob);
-  ok('画像段写明先按核心职责与画像建立明确正向关联',
-     /先执行岗位方向门槛：只有核心职责与画像的技能、真实项目或求职目标存在明确正向关联才可通过/.test(p));
-  ok('画像段要求核心职责有明确正向关联，方向成立后才按可迁移基础评估',
-     /只有核心职责与画像的技能、真实项目或求职目标存在明确正向关联才可通过/.test(p)
-     && /通用语言\/基础重合、不冲突、可学习和方向不明均不得判 true/.test(p)
+  ok('画像段写明实际职责或可选招聘分支与画像有关即可',
+     /先执行岗位方向门槛：实际职责或可选招聘分支与画像技能、项目或求职目标有关即可/.test(p)
+     && /不要求所有核心职责、最主要业务、芯片和既有项目完全一致/.test(p));
+  ok('画像段要求真实方向关联，通用基础不能替代关联且保留RTOS经验',
+     /实际职责或可选招聘分支与画像技能、项目或求职目标有关即可/.test(p)
+     && /通用语言\/基础重合、不冲突或无关标签不能单独通过/.test(p)
+     && /方向相关后按可迁移基础评估/.test(p)
      && /FreeRTOS 项目即有 RTOS 经验/.test(p));
   ok('仍保留高级独立专家的明确冲突边界，不凭未知次要技能拒绝',
-     /核心职责与画像缺少明确正向关联时可判 false/.test(p)
-     && /未知次要技能不能作为缺口/.test(p)
+     /实际工作方向与画像无关时可判 false/.test(p)
+     && /JD 强制条件与画像明确事实的实质冲突/.test(p)
+     && /未知技能不能改写为缺乏经验/.test(p)
      && /不能只用“未验证\/证据不足”代替/.test(p));
   ok('画像原文完整送入 prompt', p.includes('寻找与 MCU 嵌入式软件开发岗位'));
 
@@ -2822,8 +2830,9 @@ section('49. 岗位方向匹配以实际职责和明确可选子方向为依据'
   setCfg(cfg);
   pH.querySelector('[data-act="aiopen"]').click();
   const modalH = docH.getElementById('bh-ai-modal');
-  ok('求职画像字段说明写明"核心职责与画像有明确正向关联才自动沟通"',
-     /岗位核心职责必须与画像里的技术栈或求职意向有明确正向关联才会自动沟通/.test(modalH.textContent));
+  ok('求职画像字段说明写明相关职责即可且不要求整份JD、芯片和项目一致',
+     /实际职责或可选招聘方向与画像有关即可，不要求整份 JD、芯片和项目完全一致/.test(modalH.textContent)
+     && /通用编程或无关标签不能单独放行，明确排除与真实技能冲突仍遵守/.test(modalH.textContent));
   modalH.querySelector('[data-act="aiclose"]')?.click();
   docH.querySelectorAll('#bh-ai-modal, #bh-ai-confirm').forEach((el) => el.remove());
   resetAll();
@@ -2864,9 +2873,10 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
      user.includes(mixedJob.jd) && user.includes('MCU/RTOS') && user.includes('BSP、设备驱动'));
   ok('截图请求不因Linux字样独立拒绝，并依据真实职责建立技术关联',
      system.includes('涉及 Linux、平台不同或未列某个平台经历，本身均不是拒绝依据')
-     && system.includes('必须依据当前真实职责建立关联'));
-  ok('截图请求明确要求核心职责有正向关联后才评估可选MCU/RTOS方向',
-     system.includes('只有核心职责与画像存在明确正向关联，且无事实冲突，才可 match=true')
+     && system.includes('按当前真实职责及可选任职分支建立关联'));
+  ok('截图请求允许真实可选MCU/RTOS方向关联且仍要求无事实冲突',
+     system.includes('实际职责或可选分支与画像有明确正向关联，且无事实冲突即可 match=true')
+     && system.includes('不是要求最主要业务或所有核心职责完全对应')
      && user.includes('入职后可重点向系统与驱动、MCU/RTOS'));
   ok('模型返回通过时保留该结论，不由提示层再拒绝',
      screened.ok && screened.match && screened.reason === '嵌入式研发且可选择MCU/RTOS方向');
@@ -2890,7 +2900,7 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   const excluded = await BH.aiScreen(excludedJob);
   ok('明确不投Linux画像完整送达，混合规则仍要求尊重用户限定',
      sent[1].content.includes('只做裸机/MCU，不投 Linux。')
-     && sent[0].content.includes('用户明确写出的“不投 Linux”“只做裸机/MCU”等限定优先'));
+     && sent[0].content.includes('用户明确写出的“不投 Linux”“只做裸机”“只做 STM32”等限定优先'));
   ok('明确排斥后的真实AI拒绝结论仍生效', excluded.ok && excluded.match === false);
 
   resetAll(); setCfg(cfg);
@@ -2901,8 +2911,8 @@ section('50. 真实截图混合嵌入式校招、明确排斥与旧拒绝缓存�
   const unrelated = await BH.aiScreen({ ...mixedJob, title: '前端开发工程师', jobId: 'UNRELATED_COMPANY_BACKGROUND',
     jd: '公司业务包含MCU/RTOS智能硬件，福利有嵌入式技术培训。本岗位仅负责React网页开发、CSS页面和浏览器业务，不承担嵌入式开发，也无可选嵌入式方向。' });
   ok('公司业务/福利孤立关键词不能替代当前职位职责，仍保留明确无关拒绝',
-     sent[0].content.includes('MCU 仅出现于标签、加分项或公司业务时，不算当前实际职责')
-     && sent[0].content.includes('必须依据当前真实职责建立关联')
+     /MCU 仅出现于标签、加分项、公司业务.*不算当前实际工作/.test(sent[0].content)
+     && sent[0].content.includes('按当前真实职责及可选任职分支建立关联')
      && sent[1].content.includes('本岗位仅负责React网页开发、CSS页面和浏览器业务，不承担嵌入式开发')
      && unrelated.ok && unrelated.match === false);
 
@@ -2977,13 +2987,14 @@ section('51. 合成画像分层，相关基础优先尝试且保留明确核心�
   ok('ARM/SoC/BSP/UBoot不自动当作实际MCU工作',
      rules.includes('ARM/SoC/BSP/UBoot 等词也不自动等价于 MCU 工作'));
   ok('高级独立专家拒绝须以JD强制条件与画像明确事实冲突为据',
-     rules.includes('纯高级 Linux 内核/BSP/PCIe 等岗位若明确要求独立专家') && rules.includes('JD 强制条件原句与画像事实'));
+     rules.includes('JD 明确高级独立专家要求且画像明确能力层次与该要求冲突时可拒绝')
+     && rules.includes('技能冲突须给出 JD 强制条件原句与画像明确事实'));
   ok('普通培训导师不是独立深入核心要求的无条件豁免',
-     rules.includes('普通培训福利不能覆盖明确核心冲突') && rules.includes('不得反过来要求所有相关岗位都必须写培养安排'));
+     rules.includes('普通培训福利不能覆盖明确冲突') && rules.includes('不得要求所有相关岗位必须写培养安排'));
   ok('至少一种或任选其一按OR条件而非全部必备',
      rules.includes('“至少一种/任选其一/或”按可替代条件判断，掌握其中匹配项即可满足'));
   ok('MCU仅为标签、加分项或公司业务不算实际职责',
-     rules.includes('MCU 仅出现于标签、加分项或公司业务时，不算当前实际职责'));
+     /MCU 仅出现于标签、加分项、公司业务.*不算当前实际工作/.test(rules));
   ok('取消仅完全无关才拒和拿不准全部放的覆盖',
      !/只有当前岗位.*完全无关.*才/.test(rules) && !/拿不准\s*=\s*判\s*true/.test(deepCaseMessages[1].content));
   ok('学历年限历史限制保留，技术能力和真实项目仍应比较',

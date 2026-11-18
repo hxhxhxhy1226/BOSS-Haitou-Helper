@@ -1,4 +1,4 @@
-/* BOSS 直聘海投助手 1.1.15 — 独立 Edge / Chromium 扩展核心 */
+/* BOSS 直聘海投助手 1.1.16 — 独立 Edge / Chromium 扩展核心 */
 (async function () {
   'use strict';
 
@@ -1066,6 +1066,7 @@
     try {
     while (Date.now() <= deadline) {
       if (state.stopFlag) return { ok: false, stopped: true, reason: '已停止读取详情' };
+      if (!await dismissContactQuotaReminder() || state.stopFlag) return { ok: false, stopped: true, reason: state._lastRisk || '已停止读取详情' };
       if (options.stillAllowed && !options.stillAllowed()) return { ok: false, cancelled: true, reason: '切换条件已变化，取消读取详情' };
       if (state.paused) {
         const pausedAt = Date.now();
@@ -2393,8 +2394,10 @@
   async function humanClick(el, stillValid, beforePointerDown, options = {}) {
     const allowed = () => !state.stopFlag && !state.paused && !!el?.isConnected && (!stillValid || stillValid());
     if (!allowed()) return false;
+    if (options.card && (!await dismissContactQuotaReminder() || !allowed())) return false;
     scrollIntoViewSafe(el);
     await sleep(randInt(300, 700));
+    if (options.card && (!await dismissContactQuotaReminder() || !allowed())) return false;
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
     const cardPoint = options.card && jobCardPointerPoint(options.card, el, r);
@@ -2403,6 +2406,7 @@
     const ty = cardPoint ? cardPoint.y : r.top + r.height / 2 + randInt(-3, 3);
     await simulateMouse(tx, ty, randInt(10, 20));
     await sleep(randInt(200, 500));
+    if (options.card && (!await dismissContactQuotaReminder() || !allowed())) return false;
     // 去掉 view：油猴沙箱下 view: window 会被 Chrome 类型校验拒绝
     if (!allowed()) return false;
     const target = options.card ? jobCardPointerTarget(options.card, el, tx, ty) : el;
@@ -2413,6 +2417,7 @@
     target.dispatchEvent(new MouseEvent('mouseover', o));
     target.dispatchEvent(new MouseEvent('mousedown', o));
     await sleep(randInt(30, 100));
+    if (options.card && (!await dismissContactQuotaReminder() || !allowed())) return false;
     if (!allowed()) return false;
     if (!target.isConnected || options.card && !usableJobCardClickTarget(options.card, target)) return false;
     target.dispatchEvent(new MouseEvent('mouseup', o));
@@ -2465,6 +2470,8 @@
   }
 
   async function selectJobCard(card, options = {}) {
+    if (!await dismissContactQuotaReminder() || state.stopFlag) return { ok: false, stopped: true,
+      reason: state._lastRisk || '已停止切换职位' };
     const expected = options.expected || readJobCard(card);
     const key = jobCardKey(card);
     const valid = () => !state.stopFlag && !!card?.isConnected && cardStillMatches(card, expected)
@@ -2541,6 +2548,7 @@
     if (!allowed() || state.paused || state._jobProcessing || state._detailProcessing) return false;
     state._jobProcessing = true;
     try {
+    if (!await dismissContactQuotaReminder() || !allowed()) return false;
     const all = collectJobCards();
     const completedIndex = all.findIndex((card) => jobCardKey(card) === completedKey);
     const remaining = getUnprocessedJobCards();
@@ -6559,6 +6567,7 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
     }
 
     // 独立扩展只由用户点击开始执行详情页，安装或打开页面不会自动联系招聘方。
+    if (!await dismissContactQuotaReminder() || state.stopFlag) return;
     if (native && isDetailPage()) { await autoChatOnDetail(); return; }
     // sanity check
     const cards = qAll('jobCard');
@@ -6981,7 +6990,87 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
   const CONTACT_CONTROL_SEL = 'button, a, [role="button"], .default-btn';
   const CONTACT_SUCCESS_RE = /已向\s*BOSS\s*发送消息|打招呼成功|消息已发送|沟通成功|招呼已发送|已发送招呼|已成功打招呼/i;
   const CONTACT_FAILURE_RE = /沟通失败|发送失败|(?:今日|每天|每日).{0,20}(?:沟通|打招呼).{0,20}(?:上限|用完)|操作过于频繁|请稍后再试|请先登录|登录失效/;
+  const CONTACT_QUOTA_RE = /(?:今天|今日)已(?:经)?与(\d+)位BOSS沟通[，,。；;]?还剩(\d+)次沟通机会/i;
+  const CONTACT_QUOTA_BUTTON_RE = /^(好|好的|知道了|确定)$/;
+  const CONTACT_QUOTA_EXCLUDED_SEL = '#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm, #bh-model-picker, '
+    + JOB_CARD_SEL + ', ' + JD_BODY_SEL;
+  let contactQuotaDismissal = null;
+  const contactQuotaReceiptObservers = new Set();
   const activeContactContexts = new Set();
+  function findContactQuotaReminder() {
+    const inspect = (dialog) => {
+      if (!dialog?.isConnected || ['BODY', 'HTML'].includes(dialog.tagName)
+        || dialog.closest(CONTACT_QUOTA_EXCLUDED_SEL) || dialog.matches(DETAIL_ROOT_SEL + ', ' + JOB_LIST_SEL)
+        || !CONTACT_QUOTA_RE.test((dialog.textContent || '').replace(/\s+/g, ''))) return null;
+      const text = contactNoticeText(dialog, { preferTitle: false });
+      const match = text.replace(/\s+/g, '').match(CONTACT_QUOTA_RE);
+      if (!match) return null;
+      const button = [...dialog.querySelectorAll(CONTACT_CONTROL_SEL)].find((control) =>
+        CONTACT_QUOTA_BUTTON_RE.test((control.textContent || '').replace(/\s+/g, ''))
+        && !control.disabled && control.getAttribute('aria-disabled') !== 'true'
+        && !control.closest(CONTACT_QUOTA_EXCLUDED_SEL) && isReadableElement(control) && isVisible(control));
+      return { dialog, button, text, used: Number(match[1]), remaining: Number(match[2]) };
+    };
+    for (const dialog of document.querySelectorAll(CONTACT_DIALOG_SEL)) {
+      const reminder = inspect(dialog);
+      if (reminder) return reminder;
+    }
+    for (const control of document.querySelectorAll(CONTACT_CONTROL_SEL)) {
+      if (!CONTACT_QUOTA_BUTTON_RE.test((control.textContent || '').replace(/\s+/g, ''))
+        || control.closest(CONTACT_QUOTA_EXCLUDED_SEL)) continue;
+      for (let node = control.parentElement, level = 0; node && !['BODY', 'HTML'].includes(node.tagName) && level < 6; node = node.parentElement, level++) {
+        if (node.matches(CONTACT_QUOTA_EXCLUDED_SEL + ', ' + DETAIL_ROOT_SEL + ', ' + JOB_LIST_SEL)) break;
+        const reminder = inspect(node);
+        if (reminder) return reminder;
+      }
+    }
+    return null;
+  }
+  async function dismissContactQuotaReminder(observe) {
+    if (typeof observe === 'function') contactQuotaReceiptObservers.add(observe);
+    try {
+      if (!contactQuotaDismissal) {
+        const reminder = findContactQuotaReminder();
+        if (!reminder) return true;
+        contactQuotaDismissal = dismissContactQuotaReminderInner(reminder)
+          .finally(() => { contactQuotaDismissal = null; });
+      }
+      observe?.();
+      const closed = await contactQuotaDismissal;
+      observe?.();
+      return closed;
+    } finally { contactQuotaReceiptObservers.delete(observe); }
+  }
+  async function dismissContactQuotaReminderInner(reminder) {
+    const deadline = Date.now() + 2500;
+    const clicked = new Set();
+    let hiddenSince = null;
+    while (Date.now() < deadline || hiddenSince !== null) {
+      for (const observe of contactQuotaReceiptObservers) observe();
+      reminder = findContactQuotaReminder();
+      if (!reminder) {
+        if (hiddenSince === null) hiddenSince = Date.now();
+        else if (Date.now() - hiddenSince >= 200) return true;
+      } else {
+        hiddenSince = null;
+        if (reminder.remaining === 0) {
+          state._lastRisk = 'BOSS 今日沟通机会已用完（剩余 0 次）';
+          stop(state._lastRisk);
+        }
+        if (reminder.button && !clicked.has(reminder.button)) {
+          if (clicked.size >= 2) break;
+          clicked.add(reminder.button);
+          try { reminder.button.click(); } catch (_) { break; }
+          for (const observe of contactQuotaReceiptObservers) observe();
+          addLog(`已确认 BOSS 沟通次数提醒：已沟通 ${reminder.used} 位，剩余 ${reminder.remaining} 次`);
+        }
+      }
+      await sleep(100);
+    }
+    state._lastRisk = 'BOSS 沟通次数提醒未能关闭，请点击“好”后重新开始';
+    stop(state._lastRisk);
+    return false;
+  }
   function contactIdentityMutationRelevant(records) {
     return records.some((record) => {
       const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
@@ -6995,11 +7084,11 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
     const success = compact.match(CONTACT_SUCCESS_RE);
     return success ? 'confirmed:' + success[0] : '';
   }
-  function contactNoticeText(el) {
+  function contactNoticeText(el, { preferTitle = true } = {}) {
     if (!el?.isConnected || !isReadableElement(el) || !isVisible(el)
       || el.closest('#boss-helper-panel, #bh-detail-modal, #bh-ai-modal, #bh-ai-confirm, ' + JOB_CARD_SEL + ', ' + JD_BODY_SEL)) return '';
     // 优先读取官方标题，消息预览可能很长，也可能包含“发送失败”等用户自己的文字。
-    const headings = [...(el.matches(CONTACT_TITLE_SEL) ? [el] : []), ...el.querySelectorAll(CONTACT_TITLE_SEL)];
+    const headings = preferTitle ? [...(el.matches(CONTACT_TITLE_SEL) ? [el] : []), ...el.querySelectorAll(CONTACT_TITLE_SEL)] : [];
     for (const heading of headings) {
       if (!isReadableElement(heading) || !isVisible(heading) || heading.closest(JOB_CARD_SEL + ', ' + JD_BODY_SEL)) continue;
       const title = heading.textContent.replace(/\s+/g, ' ').trim();
@@ -7120,19 +7209,31 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
   }
   async function waitForOfficialContactResult(context, timeoutMs = 8000) {
     const until = Date.now() + timeoutMs;
+    let result = null;
+    const observe = () => {
+      const next = readOfficialContactResult(context);
+      if (next && (!result || next.status === 'rejected')) result = next;
+    };
     do {
-      const result = readOfficialContactResult(context);
+      observe();
+      const closed = await dismissContactQuotaReminder(observe);
       if (result) return result;
-      if (state.stopFlag || state.paused || !contactContextCurrent(context) || Date.now() >= until) break;
+      if (!closed || state.stopFlag || state.paused || !contactContextCurrent(context) || Date.now() >= until) break;
       await sleep(200);
     } while (true);
     return { status: 'unconfirmed', reason: '未收到当前职位的官方成功回执，请在 BOSS 消息中核对' };
   }
   async function dismissOfficialContactDialog(result, context) {
+    const observe = () => {
+      const next = readOfficialContactResult(context);
+      if (next?.status === 'rejected' || next?.dialog && !result.dialog) Object.assign(result, next);
+    };
+    if (!await dismissContactQuotaReminder(observe) || result.status === 'rejected') return false;
     // 按钮状态可能先更新，成功框在下一次页面渲染才出现；等待它挂载后再清理。
     if (!result.dialog && result.button) {
       const deadline = Date.now() + 1000;
       while (Date.now() < deadline && contactContextCurrent(context)) {
+        if (!await dismissContactQuotaReminder(observe) || result.status === 'rejected') return false;
         const next = readOfficialContactResult(context);
         if (next?.status === 'rejected') { Object.assign(result, next); return false; }
         if (next?.dialog) { Object.assign(result, next); break; }
@@ -7152,6 +7253,7 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
     };
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!contactContextCurrent(context)) return false;
+      if (!await dismissContactQuotaReminder(observe) || result.status === 'rejected') return false;
       if (visible()) {
         const stay = contactStayButton(dialog);
         const icon = [...dialog.querySelectorAll('[aria-label="关闭"], [aria-label="Close"], [data-act="close"], .dialog-close, .close-dialog, .close-icon, .icon-close, .close')]
@@ -7166,6 +7268,7 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
       // Finish the hidden stability check already in progress before timing out.
       while (Date.now() < deadline || hiddenSince !== null) {
         if (!contactContextCurrent(context)) return false;
+        if (!await dismissContactQuotaReminder(observe) || result.status === 'rejected') return false;
         if (visible()) hiddenSince = null;
         else if (hiddenSince === null) hiddenSince = Date.now();
         else if (Date.now() - hiddenSince >= 200) return true;
@@ -7949,6 +8052,7 @@ MCU 仅出现在公司介绍、无关标签、加分项、培训销售对象或�
       state, loadConfig, loadStats, resetStats, saveStats, matchJob, addLog, runAIGate, applyConfig,
       todayKey, statsPersistenceAvailable, consumeAIDailyQuota, reserveDelivery, dispatchDelivery, releaseDelivery, deliveryReservationValid,
       commitDelivery, markDeliveryClicked, cancelUnclickedDelivery, captureOfficialContactContext, readOfficialContactResult, waitForOfficialContactResult, performOfficialContact,
+      findContactQuotaReminder, dismissContactQuotaReminder,
       // v1.0.14：活跃度解析暴露给测试 —— 排查"在线却被判 N 天前"这类误判要用它
       parseActiveDays, parseSalaryK,
       readScopedText, isReadableElement, extractDescription, collectJobDescriptionText, collectText,

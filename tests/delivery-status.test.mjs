@@ -627,3 +627,273 @@ test('点击前停止则释放预留，不占发起次数', async (t) => {
   assert.equal(f.BH.loadStats().sent, 0);
   assert.equal(f.BH.loadStats().pending, 0);
 });
+
+function quotaReminder(f, { remaining = 30, used = 120, plain = false, split = false, parent = f.doc.body } = {}) {
+  const dialog = f.doc.createElement('section');
+  if (!plain) dialog.className = 'boss-dialog__wrapper';
+  dialog.innerHTML = '<header><h3>温馨提示</h3></header><p>'
+    + (split ? `您今天已与<strong>${used}</strong>位<span>BOSS</span>沟通，还剩<b>${remaining}</b>次沟通机会哦`
+      : `您今天已与${used}位BOSS沟通，还剩${remaining}次沟通机会哦`)
+    + '</p><footer><button>好</button></footer>';
+  parent.append(dialog);
+  return { dialog, button: dialog.querySelector('button') };
+}
+
+test('额度提醒：120位与剩余30次准确识别，只点同框好并等待异步关闭', { timeout: 6000 }, async (t) => {
+  const f = await fixture(t), reminder = quotaReminder(f), timers = [];
+  registerTimerCleanup(t, timers);
+  let insideClicks = 0, outsideClicks = 0;
+  const outside = f.doc.createElement('button'); outside.textContent = '好';
+  outside.addEventListener('click', () => outsideClicks++); f.doc.body.prepend(outside);
+  reminder.button.addEventListener('click', () => {
+    insideClicks++;
+    timers.push(setTimeout(() => reminder.dialog.remove(), 150));
+  });
+  const found = f.BH.findContactQuotaReminder();
+  assert.equal(found.dialog, reminder.dialog);
+  assert.equal(found.button, reminder.button);
+  assert.equal(found.used, 120);
+  assert.equal(found.remaining, 30);
+  assert.match(found.text, /沟通机会/);
+  const started = Date.now();
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.ok(Date.now() - started >= 150);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(insideClicks, 1);
+  assert.equal(outsideClicks, 0);
+  assert.equal(f.BH.state.stopFlag, false);
+  assert.equal(f.BH.loadStats().sent, 0);
+});
+
+test('额度提醒：无固定类名且数字与BOSS拆分为子节点时仍能定位同框按钮', async (t) => {
+  const f = await fixture(t), reminder = quotaReminder(f, { plain: true, split: true });
+  reminder.button.addEventListener('click', () => reminder.dialog.remove());
+  const found = f.BH.findContactQuotaReminder();
+  assert.equal(found.used, 120);
+  assert.equal(found.remaining, 30);
+  assert.equal(found.button, reminder.button);
+  assert.notEqual(found.dialog, f.doc.body);
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.equal(reminder.dialog.isConnected, false);
+});
+
+test('额度提醒：隐藏框、助手、职位正文、卡片、普通温馨提示和框外好都不能误点', async (t) => {
+  const f = await fixture(t);
+  const hidden = quotaReminder(f); hidden.dialog.hidden = true;
+  const helper = quotaReminder(f, { parent: f.doc.querySelector('#boss-helper-panel') });
+  const jd = quotaReminder(f, { parent: f.doc.querySelector('.job-sec-text') });
+  const card = quotaReminder(f, { parent: mountSelectedCard(f) });
+  const ordinary = quotaReminder(f); ordinary.dialog.querySelector('p').textContent = '简历已保存，请继续完善求职信息';
+  const outside = f.doc.createElement('button'); outside.textContent = '好'; f.doc.body.append(outside);
+  let clicks = 0;
+  for (const button of [hidden.button, helper.button, jd.button, card.button, ordinary.button, outside]) {
+    button.addEventListener('click', () => clicks++);
+  }
+  assert.equal(f.BH.findContactQuotaReminder(), null);
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.equal(clicks, 0);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('额度提醒：已有提醒可关闭，但不能认领为当前岗位的成功回执', async (t) => {
+  const f = await fixture(t), reminder = quotaReminder(f);
+  let clicks = 0;
+  reminder.button.addEventListener('click', () => { clicks++; reminder.dialog.remove(); });
+  const context = f.context();
+  assert.equal(f.BH.readOfficialContactResult(context), null);
+  const result = await f.BH.waitForOfficialContactResult(context, 0);
+  assert.equal(result.status, 'unconfirmed');
+  assert.equal(clicks, 1);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.loadStats().sent, 0);
+});
+
+test('额度提醒：新出现的正剩余提醒本身也不能证明成功', async (t) => {
+  const f = await fixture(t), context = f.context(), reminder = quotaReminder(f);
+  reminder.button.addEventListener('click', () => reminder.dialog.remove());
+  assert.equal(f.BH.readOfficialContactResult(context), null);
+  const result = await f.BH.waitForOfficialContactResult(context, 0);
+  assert.equal(result.status, 'unconfirmed');
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('额度提醒：点击好之后才出现官方成功回执，继续等待并确认', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let reminder, success, clicks = 0;
+  f.button.addEventListener('click', () => {
+    clicks++; reminder = quotaReminder(f);
+    reminder.button.addEventListener('click', () => {
+      reminder.dialog.remove(); success = f.addNotice('已向BOSS发送消息');
+    });
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.dialogClosed, true);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(success.isConnected, false);
+  assert.equal(clicks, 1);
+  assert.equal(f.BH.loadStats().sent, 1);
+});
+
+test('额度提醒：同屏瞬时成功提示不能被等待关提醒的过程漏掉', { timeout: 6000 }, async (t) => {
+  const f = await fixture(t), context = f.context(), timers = [];
+  registerTimerCleanup(t, timers);
+  const success = f.doc.createElement('div'); success.className = 'toast'; success.textContent = '消息已发送';
+  f.doc.body.append(success);
+  const reminder = quotaReminder(f);
+  reminder.button.addEventListener('click', () => {
+    success.remove();
+    timers.push(setTimeout(() => reminder.dialog.remove(), 150));
+  });
+  const result = await f.BH.waitForOfficialContactResult(context, 1000);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(success.isConnected, false);
+  assert.equal(reminder.dialog.isConnected, false);
+});
+
+test('额度提醒：剩余0次清理后停止，不伪造成功或改写计数', async (t) => {
+  const f = await fixture(t), reminder = quotaReminder(f, { used: 150, remaining: 0 });
+  reminder.button.addEventListener('click', () => reminder.dialog.remove());
+  assert.equal(f.BH.findContactQuotaReminder().remaining, 0);
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, true);
+  assert.equal(f.BH.loadStats().sent, 0);
+});
+
+test('额度提醒：真实成功与剩余0次同屏，停止后保留本次成功和一次占额', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let reminder, success;
+  f.button.addEventListener('click', () => {
+    success = f.addNotice('已向BOSS发送消息');
+    reminder = quotaReminder(f, { used: 150, remaining: 0 });
+    reminder.button.addEventListener('click', () => reminder.dialog.remove());
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(success.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, true);
+  assert.equal(f.BH.loadStats().sent, 1);
+  assert.equal(await f.BH.reserveDelivery(JOB.jobId, 10), false);
+});
+
+test('额度提醒：按钮先变继续沟通，提醒晚100毫秒挂载也应关闭', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10), timers = [];
+  registerTimerCleanup(t, timers);
+  let reminder, closes = 0;
+  f.button.addEventListener('click', () => {
+    f.button.textContent = '继续沟通';
+    timers.push(setTimeout(() => {
+      reminder = quotaReminder(f);
+      reminder.button.addEventListener('click', () => { closes++; reminder.dialog.remove(); });
+    }, 100));
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.ok(reminder);
+  assert.equal(closes, 1);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('额度提醒：成功框留在此页关闭后出现额度提醒，返回前也要清理', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let success, reminder, closes = 0;
+  f.button.addEventListener('click', () => {
+    success = f.addNotice('已向BOSS发送消息');
+    success.querySelector('.cancel-btn').addEventListener('click', () => {
+      reminder = quotaReminder(f);
+      reminder.button.addEventListener('click', () => { closes++; reminder.dialog.remove(); });
+    });
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.equal(result.dialogClosed, true);
+  assert.equal(success.isConnected, false);
+  assert.ok(reminder);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(closes, 1);
+});
+
+for (const behavior of ['no-op', 'throw']) {
+  test(`额度提醒：好按钮${behavior}时有界失败并停止，不继续读卡`, { timeout: 10000 }, async (t) => {
+    const f = await fixture(t), reminder = quotaReminder(f);
+    let clicks = 0;
+    reminder.button.click = () => {
+      clicks++;
+      if (behavior === 'throw') throw new Error('fixture quota close failed');
+    };
+    assert.equal(await f.BH.dismissContactQuotaReminder(), false);
+    assert.ok(clicks >= 1 && clicks <= 3, '关闭尝试应有明确上限');
+    assert.equal(reminder.dialog.isConnected, true);
+    assert.equal(f.BH.state.stopFlag, true);
+    assert.equal(f.BH.loadStats().sent, 0);
+  });
+}
+
+test('额度提醒：点击好触发同框DOM重建时继续关闭替代框', { timeout: 10000 }, async (t) => {
+  const f = await fixture(t), original = quotaReminder(f);
+  let replacement, clicks = 0;
+  original.button.addEventListener('click', () => {
+    clicks++; original.dialog.remove(); replacement = quotaReminder(f);
+    replacement.button.addEventListener('click', () => { clicks++; replacement.dialog.remove(); });
+  });
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.equal(clicks, 2);
+  assert.equal(original.dialog.isConnected, false);
+  assert.equal(replacement.dialog.isConnected, false);
+  assert.equal(f.BH.findContactQuotaReminder(), null);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('额度提醒：真实成功标题和额度正文同框，只点好并保留官方确认', { timeout: 8000 }, async (t) => {
+  const f = await fixture(t), slot = await f.BH.reserveDelivery(JOB.jobId, 10);
+  let reminder, closes = 0, continueClicks = 0;
+  f.button.addEventListener('click', () => {
+    reminder = quotaReminder(f);
+    reminder.dialog.querySelector('h3').textContent = '已向BOSS发送消息';
+    const continued = f.doc.createElement('button'); continued.textContent = '继续沟通';
+    continued.addEventListener('click', () => continueClicks++); reminder.dialog.querySelector('footer').append(continued);
+    reminder.button.addEventListener('click', () => { closes++; reminder.dialog.remove(); });
+  });
+  const result = await f.BH.performOfficialContact(f.button, JOB, () => true, slot);
+  assert.equal(result.status, 'confirmed');
+  assert.match(result.reason, /已向BOSS发送消息/);
+  assert.equal(result.dialogClosed, true);
+  assert.equal(closes, 1);
+  assert.equal(continueClicks, 0);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, false);
+  assert.equal(f.BH.loadStats().sent, 1);
+});
+
+test('额度提醒：正文先出现而好按钮晚100毫秒挂载，等待按钮后清理', { timeout: 6000 }, async (t) => {
+  const f = await fixture(t), reminder = quotaReminder(f), timers = [];
+  registerTimerCleanup(t, timers);
+  reminder.button.remove();
+  let closes = 0;
+  reminder.button.addEventListener('click', () => { closes++; reminder.dialog.remove(); });
+  timers.push(setTimeout(() => reminder.dialog.querySelector('footer').append(reminder.button), 100));
+  const found = f.BH.findContactQuotaReminder();
+  assert.equal(found.remaining, 30);
+  assert.ok(!found.button);
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.equal(closes, 1);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, false);
+});
+
+test('额度提醒：好按钮暂禁用而100毫秒后启用，等待可点击后清理', { timeout: 6000 }, async (t) => {
+  const f = await fixture(t), reminder = quotaReminder(f), timers = [];
+  registerTimerCleanup(t, timers);
+  reminder.button.disabled = true;
+  let closes = 0;
+  reminder.button.addEventListener('click', () => { closes++; reminder.dialog.remove(); });
+  timers.push(setTimeout(() => { reminder.button.disabled = false; }, 100));
+  assert.equal(await f.BH.dismissContactQuotaReminder(), true);
+  assert.equal(closes, 1);
+  assert.equal(reminder.dialog.isConnected, false);
+  assert.equal(f.BH.state.stopFlag, false);
+});

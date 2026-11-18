@@ -938,6 +938,114 @@ test('列表点开始已经达到120：不展开岗位、不请求 AI、不沟�
 
 const SECOND = { ...JOB, id: 'nextJobFixture', data: 'job03', title: 'STM32 固件开发工程师' };
 
+for (const timing of ['开始前', '鼠标准备期间', '首个成功框关闭后']) {
+  test(`120次沟通提醒${timing}出现：先点击好并关闭遮罩，再继续两岗位投递`, { timeout: 25000 }, async (t) => {
+    const events = [], violations = [], contacted = [], timers = [];
+    cleanupTimersAfter(t, timers);
+    let reminder, confirms = 0, openReminder;
+    const f = await fixture(t, { sent: 119, dailyLimit: 150, aiEnabled: true, deepInnerSelection: true,
+      jobs: [JOB, SECOND], officialSuccess: true, stopAfter: 2,
+      onContact(win, { job }) {
+        contacted.push(job.id);
+        if (reminder?.isConnected) violations.push('contact-before-quota-close:' + job.id);
+      },
+      onExpand(win, { job }) {
+        events.push('expand:' + job.id);
+        if (reminder?.isConnected) violations.push('expand-before-quota-close:' + job.id);
+      },
+      onOfficialDialog(win, { job, dialog }) {
+        if (timing === '首个成功框关闭后' && job.id === JOB.id) {
+          dialog.querySelector('.cancel-btn').addEventListener('click', () => openReminder());
+        }
+      },
+    });
+    openReminder = () => {
+      reminder = f.win.document.createElement('section');
+      reminder.setAttribute('role', 'dialog');
+      reminder.innerHTML = '<h3>温馨提示</h3><p>您今天已与120位BOSS沟通，还剩30次沟通机会哦</p><button>好</button>';
+      f.win.document.getElementById('detail-host').setAttribute('aria-hidden', 'true');
+      reminder.querySelector('button').addEventListener('click', () => {
+        confirms++; events.push('confirm');
+        timers.push(setTimeout(() => {
+          reminder.remove(); f.win.document.getElementById('detail-host').removeAttribute('aria-hidden');
+          events.push('quota-closed');
+        }, 150));
+      });
+      f.win.document.body.append(reminder);
+    };
+    const elementFromPoint = f.win.document.elementFromPoint;
+    f.win.document.elementFromPoint = (x, y) => reminder?.isConnected ? reminder : elementFromPoint(x, y);
+    if (timing === '开始前') openReminder();
+    if (timing === '鼠标准备期间') f.win.document.addEventListener('mousemove', openReminder, { once: true });
+    f.start();
+    await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 22000);
+    assert.equal(f.clickCount(), 2, f.logs());
+    assert.deepEqual(contacted, [JOB.id, SECOND.id]);
+    assert.deepEqual(violations, [], events.join('\n'));
+    assert.equal(confirms, 1);
+    assert.equal(reminder.isConnected, false);
+    const next = timing === '首个成功框关闭后' ? SECOND.id : JOB.id;
+    assert.ok(events.indexOf('quota-closed') < events.indexOf('expand:' + next), events.join('\n'));
+    for (const card of f.win.document.querySelectorAll('li.job-card-wrap')) assert.ok(card.querySelector('.bh-tag-pass'));
+    assert.equal(f.win.BH.loadStats().sent, 121);
+    assert.equal(f.requests.length, 2);
+    assert.doesNotMatch(f.logs(), /卡片未实际切换|详情读取未确认|详情读取失败/);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
+for (const remaining of [0, 30]) {
+  test(`沟通次数提醒${remaining === 0 ? '剩余0次' : '好按钮失效'}：停止下一卡，保留首卡官方成功与去重`, { timeout: 18000 }, async (t) => {
+    const f = await fixture(t, { sent: 119, dailyLimit: 150, aiEnabled: true, jobs: [JOB, SECOND],
+      officialSuccess: true, stopAfter: 99,
+      onOfficialDialog(win, { dialog }) {
+        dialog.querySelector('.cancel-btn').addEventListener('click', () => {
+          const reminder = win.document.createElement('section'); reminder.setAttribute('role', 'dialog');
+          reminder.innerHTML = '<h3>温馨提示</h3><p>您今天已与120位BOSS沟通，还剩' + remaining + '次沟通机会哦</p><button>好</button>';
+          if (remaining === 0) reminder.querySelector('button').addEventListener('click', () => reminder.remove());
+          win.document.body.append(reminder);
+        });
+      },
+    });
+    f.start();
+    await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 16000);
+    assert.equal(f.clickCount(), 1, f.logs());
+    assert.equal(f.expandCount(), 1, '不能继续选择下一卡或把遮罩误标成读取失败');
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.win.BH.loadStats().sent, 120);
+    assert.ok(f.win.document.querySelector('[data-fixture-id="' + JOB.id + '"] .bh-tag-pass'));
+    assert.equal(f.win.document.querySelector('[data-fixture-id="' + SECOND.id + '"] .bh-tag'), null);
+    assert.equal(await f.win.BH.reserveDelivery(JOB.id, 150), false);
+    assert.equal(f.win.BH.state.stopFlag, true);
+    assert.match(f.win.BH.state._lastRisk, remaining === 0 ? /剩余 0 次/ : /沟通次数提醒未能关闭/);
+    assert.doesNotMatch(f.logs(), /卡片未实际切换|详情读取失败/);
+    assert.deepEqual(f.errors, []);
+  });
+}
+
+test('点击沟通后只有120次数提醒：关闭好但不标成功，保留本次占额和去重', { timeout: 10000 }, async (t) => {
+  let reminder, confirms = 0;
+  const f = await fixture(t, { sent: 119, dailyLimit: 150,
+    onContact(win) {
+      reminder = win.document.createElement('section'); reminder.setAttribute('role', 'dialog');
+      reminder.innerHTML = '<h3>温馨提示</h3><p>您今天已与120位BOSS沟通，还剩30次沟通机会哦</p><button>好</button>';
+      reminder.querySelector('button').addEventListener('click', () => { confirms++; reminder.remove(); });
+      win.document.body.append(reminder);
+    },
+  });
+  f.start();
+  await waitUntil(() => f.stopped() || /主循环异常/.test(f.logs()), 8000);
+  assert.equal(f.clickCount(), 1, f.logs());
+  assert.equal(confirms, 1);
+  assert.equal(reminder.isConnected, false);
+  const card = f.win.document.querySelector('.job-card-box');
+  assert.equal(card.querySelector('.bh-tag-pass'), null);
+  assert.match(card.querySelector('.bh-tag-not-sent').textContent, /未收到.*成功回执/);
+  assert.equal(f.win.BH.loadStats().sent, 120);
+  assert.equal(await f.win.BH.reserveDelivery(JOB.id, 150), false);
+  assert.deepEqual(f.errors, []);
+});
+
 test('两岗位连续投递：先异步关闭成功弹窗再展开下一家，两张卡片均为绿色成功', { timeout: 25000 }, async (t) => {
   const events = [], violations = [], stayClicks = [], continueClicks = [];
   const timers = [];
